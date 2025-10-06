@@ -186,7 +186,7 @@ def apply_sharepoint_formatting_fixed(site_id, file_server_relative_url, workshe
             cols = address.split(':')
             if len(cols) == 2:
                 start_col = cols[0][0]  # Get first column letter
-                end_col = cols[1][0]    # Get last column letter
+                end_col = cols[1][0]    # Get  column letter
                 header_range = f"{start_col}1:{end_col}1"
                 
                 # Format header row
@@ -291,7 +291,7 @@ def create_sharepoint_bom_layerwise_sheet(site_id, file_server_relative_url, ses
                 filtered_df_out.loc[mask, unit_col] = 'KG'
     
     # Add timestamp column
-    filtered_df_out['Last_Updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    filtered_df_out['Last_Updated'] = datetime.now(ZoneInfo("Asia/Dubai")).strftime('%Y-%m-%d %H:%M:%S')
     
     return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "BOM Layer-wise", filtered_df_out, access_token, session_id)
 
@@ -369,7 +369,7 @@ def create_sharepoint_fg_rm_sheet(site_id, file_server_relative_url, session_id,
     ])
     
     # Add timestamp
-    summary_df['Last_Updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    summary_df['Last_Updated'] = datetime.now(ZoneInfo("Asia/Dubai")).strftime('%Y-%m-%d %H:%M:%S')
     
     return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "FG-RM Required", summary_df, access_token, session_id, chunk_size=1000)
 
@@ -1362,4 +1362,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
