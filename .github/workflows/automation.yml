@@ -33,26 +33,6 @@ jobs:
         pip install -r requirements.txt
         
     - name: Run BOM Layer-wise automation with smart retry
-      env:
-        # SAP API Configuration
-        SAP_API_URL: https://my409486-api.s4hana.cloud.sap/sap/opu/odata/sap/API_BILL_OF_MATERIAL_SRV;v=0002
-        SAP_USERNAME: INDUS_OPEN_ORDER
-        SAP_PASSWORD: w6fo3zfq/bDYr}8>BU@{i3oFd[dq#Zv\\/eL&}SKF
-        
-        # Microsoft Graph API Configuration  
-        GRAPH_CLIENT_ID: a2239be7-12cd-442d-983f-ea7e316ef767
-        GRAPH_CLIENT_SECRET: sho8Q~sanlYEX3SKXjYJb0NSXL.gPRpdi63-tcmp
-        GRAPH_AUTHORITY: https://login.microsoftonline.com/ed97e9bb-e119-4bd4-ab00-307d64bdf908
-        
-        # SharePoint Configuration
-        SHAREPOINT_SITE_ID: 201c767f-23cc-4eff-b76c-47a275706531,094b21f9-6ed4-47c3-a751-3b217a18b98e
-        SHAREPOINT_FILE: Manufacturing Plan New.xlsx
-        
-        # Additional Configuration
-        VERIFY_SSL: 'True'
-        PREFERRED_FORMAT: 'json'
-        BATCH_SIZE: '500'
-        MAX_LAYERS: '4'
         
       run: |
         #!/bin/bash
