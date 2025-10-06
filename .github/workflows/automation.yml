@@ -1,25 +1,25 @@
-name: BOM Layer-wise Automation with Smart Retry
+name: BOM Layer-wise Daily Automation
 
 on:
   schedule:
     - cron: '0 5 * * *'  # Every day at 9:00 AM Dubai Time (5:00 AM UTC)
-  workflow_dispatch:  # Allow manual triggering
+  workflow_dispatch:  # Allow manual triggering for testing
 
 jobs:
   run-bom-automation:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # 3 hours total timeout for all retries
+    timeout-minutes: 60  # Total timeout for all retry attempts
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       
     - name: Set up Python 3.11
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         
-    - name: Cache dependencies
+    - name: Cache Python dependencies
       uses: actions/cache@v3
       with:
         path: ~/.cache/pip
@@ -32,157 +32,93 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: Run BOM Layer-wise automation with smart retry
-        
+    - name: Run BOM automation with 3 retry attempts
       run: |
         #!/bin/bash
         set +e  # Don't exit on error
         
-        MAX_ATTEMPTS=8
+        MAX_ATTEMPTS=3
         ATTEMPT=1
         SUCCESS=false
-        TIMEOUT_MINUTES=15  # Each individual run timeout (vs code takes 5 mins, so 15 mins is safe)
+        TIMEOUT_MINUTES=15  # 15 minutes timeout per attempt
         
-        echo "🚀 Starting BOM automation with smart retry system"
-        echo "⏱️  Individual run timeout: $TIMEOUT_MINUTES minutes"
-        echo "🔄 Maximum attempts: $MAX_ATTEMPTS"
-        echo "📅 Scheduled for: 9:00 AM Dubai Time (5:00 AM UTC) daily"
-        echo "=========================================="
+        echo "🚀 Starting BOM Layer-wise automation"
+        echo "⏰ Schedule: Daily at 9:00 AM Dubai Time" 
+        echo "🔄 Max attempts: $MAX_ATTEMPTS"
+        echo "⏱️  Timeout per attempt: $TIMEOUT_MINUTES minutes"
+        echo "========================================"
         
         while [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$SUCCESS" = false ]; do
           echo ""
           echo "🔥 ATTEMPT $ATTEMPT/$MAX_ATTEMPTS"
-          echo "Started at: $(date '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "------------------------------------------"
+          echo "Started: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "----------------------------------------"
           
-          # Create a background process with timeout
-          (
-            echo "⚙️  Executing Python automation script..."
-            python BOM-Layer-wise-live.py
-          ) &
-          
-          PYTHON_PID=$!
-          
-          # Wait for the process with timeout
-          SECONDS_ELAPSED=0
-          MAX_SECONDS=$((TIMEOUT_MINUTES * 60))
-          
-          while kill -0 $PYTHON_PID 2>/dev/null; do
-            if [ $SECONDS_ELAPSED -ge $MAX_SECONDS ]; then
-              echo "⏰ TIMEOUT: Process exceeded $TIMEOUT_MINUTES minutes, terminating..."
-              kill -TERM $PYTHON_PID 2>/dev/null
-              sleep 5
-              kill -KILL $PYTHON_PID 2>/dev/null
-              break
-            fi
-            
-            # Progress indicator every minute
-            if [ $((SECONDS_ELAPSED % 60)) -eq 0 ] && [ $SECONDS_ELAPSED -gt 0 ]; then
-              MINUTES_ELAPSED=$((SECONDS_ELAPSED / 60))
-              echo "📊 Progress: $MINUTES_ELAPSED/$TIMEOUT_MINUTES minutes elapsed..."
-            fi
-            
-            sleep 10
-            SECONDS_ELAPSED=$((SECONDS_ELAPSED + 10))
-          done
-          
-          # Get exit code
-          wait $PYTHON_PID 2>/dev/null
+          # Run Python script with timeout
+          timeout ${TIMEOUT_MINUTES}m python BOM-Layer-wise-live.py
           EXIT_CODE=$?
           
-          TOTAL_TIME_MIN=$((SECONDS_ELAPSED / 60))
-          TOTAL_TIME_SEC=$((SECONDS_ELAPSED % 60))
+          echo "Finished: $(date '+%Y-%m-%d %H:%M:%S UTC')"
           
           if [ $EXIT_CODE -eq 0 ]; then
             echo "✅ SUCCESS: BOM automation completed successfully!"
-            echo "⏱️  Execution time: ${TOTAL_TIME_MIN}m ${TOTAL_TIME_SEC}s"
-            echo "🎯 Attempt: $ATTEMPT/$MAX_ATTEMPTS"
+            echo "🎯 Completed on attempt: $ATTEMPT/$MAX_ATTEMPTS"
             SUCCESS=true
+          elif [ $EXIT_CODE -eq 124 ]; then
+            echo "❌ TIMEOUT: Process exceeded $TIMEOUT_MINUTES minutes"
+            echo "⏰ Attempt $ATTEMPT failed due to timeout"
           else
-            echo "❌ FAILED: Attempt $ATTEMPT failed"
-            echo "🔍 Exit code: $EXIT_CODE"
-            echo "⏱️  Runtime: ${TOTAL_TIME_MIN}m ${TOTAL_TIME_SEC}s"
-            
-            if [ $SECONDS_ELAPSED -ge $MAX_SECONDS ]; then
-              echo "💀 Reason: Timeout (exceeded $TIMEOUT_MINUTES minutes)"
-            else
-              echo "💀 Reason: Script error or exception"
-            fi
-            
-            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-              # Smart wait time: 1-3 minutes depending on failure type
-              if [ $SECONDS_ELAPSED -ge $MAX_SECONDS ]; then
-                WAIT_TIME=180  # 3 minutes for timeout
-                echo "🕐 Waiting 3 minutes (timeout failure)..."
-              elif [ $TOTAL_TIME_MIN -lt 1 ]; then
-                WAIT_TIME=60   # 1 minute for quick failures
-                echo "🕐 Waiting 1 minute (quick failure)..."
-              else
-                WAIT_TIME=120  # 2 minutes for normal failures  
-                echo "🕐 Waiting 2 minutes (normal failure)..."
-              fi
-              
-              sleep $WAIT_TIME
-            else
-              echo "💀 FINAL FAILURE: All $MAX_ATTEMPTS attempts exhausted"
-              echo "📋 Total attempts: $MAX_ATTEMPTS"
-              echo "⏱️  Total time spent: ~$((ATTEMPT * (TIMEOUT_MINUTES + 3))) minutes"
-            fi
+            echo "❌ ERROR: Script failed with exit code: $EXIT_CODE"
+            echo "🔍 Attempt $ATTEMPT failed due to script error"
           fi
           
-          echo "Completed attempt $ATTEMPT at: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          if [ "$SUCCESS" = false ] && [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+            echo "⏳ Waiting 2 minutes before retry..."
+            sleep 120  # Wait 2 minutes between attempts
+          fi
+          
           ATTEMPT=$((ATTEMPT + 1))
         done
         
         echo ""
-        echo "=========================================="
+        echo "========================================"
         if [ "$SUCCESS" = true ]; then
-          echo "🎉 WORKFLOW SUCCESS: Automation completed successfully!"
-          echo "📈 Performance: Within expected 15-minute window"
+          echo "🎉 WORKFLOW SUCCESS!"
+          echo "✅ BOM automation completed successfully"
           exit 0
         else
-          echo "💥 WORKFLOW FAILURE: All retry attempts failed"
-          echo "🔍 Check logs for detailed error analysis"
-          echo "📞 Consider manual investigation required"
+          echo "💥 WORKFLOW FAILED!"
+          echo "❌ All $MAX_ATTEMPTS attempts failed"
+          echo "🔍 Check logs for error details"
           exit 1
         fi
         
-    - name: Upload comprehensive logs
-      if: always()  # Always run regardless of success/failure
+    - name: Upload logs if available
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: bom-automation-logs-${{ github.run_number }}-${{ github.run_attempt }}
+        name: bom-automation-logs-${{ github.run_number }}
         path: |
-          bom_layerwise.log
           *.log
-        retention-days: 30
+          bom_layerwise.log
+        retention-days: 7
+        if-no-files-found: ignore
         
-    - name: Performance summary
+    - name: Success notification
       if: success()
       run: |
-        echo "📊 PERFORMANCE SUMMARY"
-        echo "======================"
-        echo "✅ Status: Successfully completed"
-        echo "🎯 Target: ≤15 minutes per run (VS Code baseline: 5 minutes)" 
-        echo "📅 Schedule: Daily at 9:00 AM Dubai Time"
-        echo "🔄 Retry Logic: Smart retry with timeout protection"
-        echo "📦 Artifacts: Logs automatically saved for 30 days"
+        echo "📊 AUTOMATION SUMMARY"
+        echo "====================="
+        echo "✅ Status: Completed successfully"
+        echo "📅 Next run: Tomorrow at 9:00 AM Dubai time"
+        echo "⏱️  Expected runtime: ~5-15 minutes"
         
-    - name: Failure analysis
+    - name: Failure notification  
       if: failure()
       run: |
-        echo "🚨 FAILURE ANALYSIS"
-        echo "==================="
-        echo "❌ Status: Failed after all retry attempts"
-        echo "🔍 Common causes to investigate:"
-        echo "   1. SAP API authentication/connectivity issues"
-        echo "   2. Microsoft Graph API token problems"
-        echo "   3. SharePoint file access or permissions"
-        echo "   4. Network timeouts or rate limiting"
-        echo "   5. Data structure changes in source systems"
-        echo ""
-        echo "🛠️  Next steps:"
-        echo "   1. Check uploaded logs for detailed error messages"
-        echo "   2. Verify all repository secrets are correctly set"
-        echo "   3. Test manually if needed using workflow_dispatch"
-        echo "   4. Consider running during off-peak hours if API limits hit"
+        echo "🚨 AUTOMATION FAILED"
+        echo "===================="
+        echo "❌ All 3 retry attempts failed"
+        echo "🔍 Check the job logs above for error details"
+        echo "🛠️  You can manually trigger the workflow to retry"
+        echo "📅 Next scheduled run: Tomorrow at 9:00 AM Dubai time"
