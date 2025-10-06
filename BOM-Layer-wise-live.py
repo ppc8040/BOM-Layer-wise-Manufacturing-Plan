@@ -12,8 +12,6 @@ from openpyxl import load_workbook
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import msal
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 if sys.platform == "win32":
     import os
@@ -186,7 +184,7 @@ def apply_sharepoint_formatting_fixed(site_id, file_server_relative_url, workshe
             cols = address.split(':')
             if len(cols) == 2:
                 start_col = cols[0][0]  # Get first column letter
-                end_col = cols[1][0]    # Get  column letter
+                end_col = cols[1][0]    # Get last column letter
                 header_range = f"{start_col}1:{end_col}1"
                 
                 # Format header row
@@ -290,9 +288,6 @@ def create_sharepoint_bom_layerwise_sheet(site_id, file_server_relative_url, ses
                 filtered_df_out.loc[mask, qty_col] = filtered_df_out.loc[mask].apply(convert_and_scale_g_to_kg, axis=1)
                 filtered_df_out.loc[mask, unit_col] = 'KG'
     
-    # Add timestamp column
-    filtered_df_out['Last_Updated'] = datetime.now(ZoneInfo("Asia/Dubai")).strftime('%Y-%m-%d %H:%M:%S')
-    
     return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "BOM Layer-wise", filtered_df_out, access_token, session_id)
 
 def create_sharepoint_fg_rm_sheet(site_id, file_server_relative_url, session_id, access_token, main_sheet_df, max_layers):
@@ -368,20 +363,13 @@ def create_sharepoint_fg_rm_sheet(site_id, file_server_relative_url, session_id,
         "Main_FG", "Raw Material", "Raw Material Description", "Raw Material qty", "Raw Material UoM"
     ])
     
-    # Add timestamp
-    summary_df['Last_Updated'] = datetime.now(ZoneInfo("Asia/Dubai")).strftime('%Y-%m-%d %H:%M:%S')
-    
     return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "FG-RM Required", summary_df, access_token, session_id, chunk_size=1000)
 
 def create_sharepoint_mb52_sheet(site_id, file_server_relative_url, session_id, access_token, stock_df):
     """Create MB52 Raw Data sheet directly in SharePoint"""
     logger.info("Creating MB52 Raw Data sheet directly in SharePoint...")
     
-    # Add timestamp column
-    stock_df_with_timestamp = stock_df.copy()
-    stock_df_with_timestamp['Last_Updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
-    return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "MB52 Raw Data", stock_df_with_timestamp, access_token, session_id)
+    return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "MB52 Raw Data", stock_df, access_token, session_id)
 
 def read_sharepoint_production_tracker(site_id, file_server_relative_url, session_id, access_token):
     """Read Production Tracker data robustly from SharePoint; return empty DF gracefully on error."""
@@ -601,7 +589,7 @@ def set_sharepoint_timestamp(site_id, file_server_relative_url, worksheet_name, 
         "workbook-session-id": session_id
     }
     
-    update_datetime = datetime.now(ZoneInfo("Asia/Dubai")).strftime('Last Updated: %d-%m-%Y %H:%M:%S')
+    update_datetime = datetime.now().strftime('Last Updated: %d-%m-%Y %H:%M:%S')
     payload = {"values": [[update_datetime]]}
     
     update_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{cell_address}')"
@@ -944,6 +932,65 @@ def get_rm_requirements_for_fg(fg, fg_rm_df):
             rm_req[rm_code] = (rm_desc, rm_qty, rm_uom)
     
     return rm_req
+
+def set_single_header_timestamp(site_id, file_server_relative_url, worksheet_name, session_id, access_token):
+    """
+    Sets the timestamp in ONLY the header cell immediately after the last column of the current data in that sheet.
+    The formatting will match the other header cells.
+    """
+    import requests
+    from datetime import datetime
+    from openpyxl.utils import column_index_from_string, get_column_letter
+
+    session = requests.Session()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "workbook-session-id": session_id
+    }
+
+    # Get used range to determine last column
+    used_range_url = (
+        f"https://graph.microsoft.com/v1.0/sites/{site_id}"
+        f"/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/usedRange"
+    )
+    resp = session.get(used_range_url, headers=headers)
+    if resp.status_code != 200:
+        logger.error(f"Could not get usedRange for {worksheet_name}")
+        return False
+
+    address = resp.json().get("address", "")
+    # Ensure we always take the last cell column, even if the address has multiple letters!
+    # e.g. "A1:I73821" or "A1:AA80200"
+    if "!" in address:
+        address = address.split("!", 1)[1]
+    endcell = address.split(":")[-1]  # e.g., "I73821", "AA80200"
+    last_col_letters = ''.join([c for c in endcell if c.isalpha()])
+    from openpyxl.utils import column_index_from_string, get_column_letter
+    last_col_idx = column_index_from_string(last_col_letters)
+    ts_col_letter = get_column_letter(last_col_idx + 1)
+    ts_cell = f"{ts_col_letter}1"
+
+    # Write just the timestamp into the header cell
+    timestamp_text = "Last Updated: " + datetime.now().strftime('%d-%m-%Y %H:%M:%S')
+    payload = {"values": [[timestamp_text]]}
+    cell_url = (
+        f"https://graph.microsoft.com/v1.0/sites/{site_id}"
+        f"/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{ts_cell}')"
+    )
+    resp2 = session.patch(cell_url, headers=headers, json=payload)
+    if resp2.status_code not in [200, 201]:
+        logger.error(f"Failed to write timestamp to {worksheet_name} at {ts_cell}: {resp2.text}")
+        return False
+
+    # Apply header formatting to timestamp cell
+    fill_url = f"{cell_url}/format/fill"
+    font_url = f"{cell_url}/format/font"
+    session.patch(fill_url, headers=headers, json={"color": "#366092"})
+    session.patch(font_url, headers=headers, json={"bold": True, "color": "#FFFFFF"})
+    logger.info(f"Wrote timestamp in header for {worksheet_name} at {ts_cell}")
+    return True
+
 
 def process_fifo_allocation(df_orders, fg_rm_df, mb52_df):
     """FIFO ALLOCATION: Date-based FIFO across ALL orders"""
@@ -1312,10 +1359,11 @@ def main():
             # Update SharePoint Production Tracker with results
             success_tracker = update_sharepoint_production_tracker_results(SITE_ID, SHAREPOINT_FILE, session_id, access_token, results_df, full_df)
             
-            # Set timestamps in all sheets
-            set_sharepoint_timestamp(SITE_ID, SHAREPOINT_FILE, "Production Tracker", session_id, access_token, "R1")
-            set_sharepoint_timestamp(SITE_ID, SHAREPOINT_FILE, "BOM Layer-wise", session_id, access_token, "S1")
-            set_sharepoint_timestamp(SITE_ID, SHAREPOINT_FILE, "FG-RM Required", session_id, access_token, "F1")
+            set_single_header_timestamp(SITE_ID, SHAREPOINT_FILE, "MB52 Raw Data", session_id, access_token)
+            set_single_header_timestamp(SITE_ID, SHAREPOINT_FILE, "Production Tracker", session_id, access_token)
+            set_single_header_timestamp(SITE_ID, SHAREPOINT_FILE, "BOM Layer-wise", session_id, access_token)
+            set_single_header_timestamp(SITE_ID, SHAREPOINT_FILE, "FG-RM Required", session_id, access_token)
+
             
             # Log SharePoint operations results
             if success_main and success_fg_rm and success_stock and success_tracker:
@@ -1362,5 +1410,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
