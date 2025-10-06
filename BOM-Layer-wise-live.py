@@ -933,62 +933,41 @@ def get_rm_requirements_for_fg(fg, fg_rm_df):
     
     return rm_req
 
-def set_single_header_timestamp(site_id, file_server_relative_url, worksheet_name, session_id, access_token):
+def set_fixed_header_timestamp(site_id, file_server_relative_url, worksheet_name, cell_address, session_id, access_token):
     """
-    Sets the timestamp in ONLY the header cell immediately after the last column of the current data in that sheet.
-    The formatting will match the other header cells.
+    Writes timestamp ONLY to the given header cell (e.g., 'R1') and applies header formatting.
+    Usage:
+      set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "Production Tracker", "R1", session_id, access_token)
     """
-    import requests
-    from datetime import datetime
-    from openpyxl.utils import column_index_from_string, get_column_letter
 
     session = requests.Session()
-    headers = {
+    api_headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "workbook-session-id": session_id
     }
 
-    # Get used range to determine last column
-    used_range_url = (
+    # 1) Write timestamp value
+    ts_text = "Last Updated: " + datetime.now().strftime('%d-%m-%Y %H:%M:%S')
+    put_url = (
         f"https://graph.microsoft.com/v1.0/sites/{site_id}"
-        f"/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/usedRange"
+        f"/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{cell_address}')"
     )
-    resp = session.get(used_range_url, headers=headers)
-    if resp.status_code != 200:
-        logger.error(f"Could not get usedRange for {worksheet_name}")
+    put_resp = session.patch(put_url, headers=api_headers, json={"values": [[ts_text]]}, timeout=60)
+    if put_resp.status_code not in (200, 201):
+        logger.error(f"Timestamp write failed for {worksheet_name} {cell_address}: {put_resp.status_code} {put_resp.text}")
         return False
 
-    address = resp.json().get("address", "")
-    # Ensure we always take the last cell column, even if the address has multiple letters!
-    # e.g. "A1:I73821" or "A1:AA80200"
-    if "!" in address:
-        address = address.split("!", 1)[1]
-    endcell = address.split(":")[-1]  # e.g., "I73821", "AA80200"
-    last_col_letters = ''.join([c for c in endcell if c.isalpha()])
-    from openpyxl.utils import column_index_from_string, get_column_letter
-    last_col_idx = column_index_from_string(last_col_letters)
-    ts_col_letter = get_column_letter(last_col_idx + 1)
-    ts_cell = f"{ts_col_letter}1"
+    # 2) Apply header formatting (fill + font) to that exact cell
+    fill_url = f"{put_url}/format/fill"
+    font_url = f"{put_url}/format/font"
 
-    # Write just the timestamp into the header cell
-    timestamp_text = "Last Updated: " + datetime.now().strftime('%d-%m-%Y %H:%M:%S')
-    payload = {"values": [[timestamp_text]]}
-    cell_url = (
-        f"https://graph.microsoft.com/v1.0/sites/{site_id}"
-        f"/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{ts_cell}')"
-    )
-    resp2 = session.patch(cell_url, headers=headers, json=payload)
-    if resp2.status_code not in [200, 201]:
-        logger.error(f"Failed to write timestamp to {worksheet_name} at {ts_cell}: {resp2.text}")
-        return False
+    # Header background color
+    session.patch(fill_url, headers=api_headers, json={"color": "#366092"}, timeout=30)
+    # Header font style
+    session.patch(font_url, headers=api_headers, json={"bold": True, "color": "#FFFFFF"}, timeout=30)
 
-    # Apply header formatting to timestamp cell
-    fill_url = f"{cell_url}/format/fill"
-    font_url = f"{cell_url}/format/font"
-    session.patch(fill_url, headers=headers, json={"color": "#366092"})
-    session.patch(font_url, headers=headers, json={"bold": True, "color": "#FFFFFF"})
-    logger.info(f"Wrote timestamp in header for {worksheet_name} at {ts_cell}")
+    logger.info(f"Timestamp written and formatted at {worksheet_name} {cell_address}")
     return True
 
 
@@ -1359,10 +1338,18 @@ def main():
             # Update SharePoint Production Tracker with results
             success_tracker = update_sharepoint_production_tracker_results(SITE_ID, SHAREPOINT_FILE, session_id, access_token, results_df, full_df)
             
-            set_single_header_timestamp(SITE_ID, SHAREPOINT_FILE, "MB52 Raw Data", session_id, access_token)
-            set_single_header_timestamp(SITE_ID, SHAREPOINT_FILE, "Production Tracker", session_id, access_token)
-            set_single_header_timestamp(SITE_ID, SHAREPOINT_FILE, "BOM Layer-wise", session_id, access_token)
-            set_single_header_timestamp(SITE_ID, SHAREPOINT_FILE, "FG-RM Required", session_id, access_token)
+            # After finishing Production Tracker updates
+            set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "Production Tracker", "R1", session_id, access_token)
+
+            # After finishing BOM Layer-wise updates
+            set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "BOM Layer-wise", "S1", session_id, access_token)
+
+            # After finishing FG-RM Required updates
+            set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "FG-RM Required", "F1", session_id, access_token)
+
+            # After finishing MB52 Raw Data updates
+            set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "MB52 Raw Data", "I1", session_id, access_token)
+
 
             
             # Log SharePoint operations results
