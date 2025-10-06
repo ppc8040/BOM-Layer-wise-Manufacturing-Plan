@@ -12,6 +12,8 @@ from openpyxl import load_workbook
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import msal
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 if sys.platform == "win32":
     import os
@@ -599,7 +601,7 @@ def set_sharepoint_timestamp(site_id, file_server_relative_url, worksheet_name, 
         "workbook-session-id": session_id
     }
     
-    update_datetime = datetime.now().strftime('Last Updated: %d-%m-%Y %H:%M:%S')
+    update_datetime = datetime.now(ZoneInfo("Asia/Dubai")).strftime('Last Updated: %d-%m-%Y %H:%M:%S')
     payload = {"values": [[update_datetime]]}
     
     update_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{cell_address}')"
@@ -1360,3 +1362,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
