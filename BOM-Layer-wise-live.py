@@ -28,36 +28,35 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-
 logger = logging.getLogger(__name__)
 
-# --- Configuration from Environment Variables ---
-SAP_API_URL = os.getenv('SAP_API_URL', 'https://my409486-api.s4hana.cloud.sap/sap/opu/odata/sap/API_BILL_OF_MATERIAL_SRV;v=0002')
-USERNAME = os.getenv('SAP_USERNAME', 'INDUS_OPEN_ORDER')  
-PASSWORD = os.getenv('SAP_PASSWORD', 'w6fo3zfq/bDYr}8>BU@{i3oFd[dq#Zv\\/eL&}SKF')  # Will be empty if not set, causing failure
-VERIFY_SSL = os.getenv('VERIFY_SSL', 'True').lower() == 'true'
-PREFERRED_FORMAT = os.getenv('PREFERRED_FORMAT', 'json')
-BATCH_SIZE = int(os.getenv('BATCH_SIZE', 500))
-MAX_LAYERS = int(os.getenv('MAX_LAYERS', 4))
+# --- Configuration ---
+SAP_API_URL = "https://my409486-api.s4hana.cloud.sap/sap/opu/odata/sap/API_BILL_OF_MATERIAL_SRV;v=0002"
+USERNAME = "INDUS_OPEN_ORDER"
+PASSWORD = "w6fo3zfq/bDYr}8>BU@{i3oFd[dq#Zv\\/eL&}SKF"
+VERIFY_SSL = True
+PREFERRED_FORMAT = 'json'
+BATCH_SIZE = 500
+MAX_LAYERS = 4
 
 # === SHAREPOINT-ONLY GRAPH API INTEGRATION ===
 import msal
 import json
 
 class AuthConfig:
-    CLIENT_ID = os.getenv('GRAPH_CLIENT_ID', 'a2239be7-12cd-442d-983f-ea7e316ef767')
-    CLIENT_SECRET = os.getenv('GRAPH_CLIENT_SECRET', 'sho8Q~sanlYEX3SKXjYJb0NSXL.gPRpdi63-tcmp')  
-    AUTHORITY = os.getenv('GRAPH_AUTHORITY', 'https://login.microsoftonline.com/ed97e9bb-e119-4bd4-ab00-307d64bdf908')
+    CLIENT_ID = 'a2239be7-12cd-442d-983f-ea7e316ef767'
+    CLIENT_SECRET = 'sho8Q~sanlYEX3SKXjYJb0NSXL.gPRpdi63-tcmp'
+    AUTHORITY = 'https://login.microsoftonline.com/ed97e9bb-e119-4bd4-ab00-307d64bdf908'
 
 def get_access_token():
     """Get Microsoft Graph API access token"""
     auth_config = AuthConfig()
     app = msal.ConfidentialClientApplication(
-        auth_config.CLIENT_ID,
-        authority=auth_config.AUTHORITY,
+        auth_config.CLIENT_ID, 
+        authority=auth_config.AUTHORITY, 
         client_credential=auth_config.CLIENT_SECRET
     )
-
+    
     result = app.acquire_token_silent(scopes=['https://graph.microsoft.com/.default'], account=None)
     if not result:
         result = app.acquire_token_for_client(scopes=['https://graph.microsoft.com/.default'])
@@ -1174,18 +1173,9 @@ def main():
     logger.info("Starting SHAREPOINT-ONLY BOM layer-wise FIFO allocation system...")
     start_time = time.time()
     
-    # SharePoint configuration from environment variables
-    SITE_ID = os.getenv('SHAREPOINT_SITE_ID', '201c767f-23cc-4eff-b76c-47a275706531,094b21f9-6ed4-47c3-a751-3b217a18b98e')
-    SHAREPOINT_FILE = os.getenv('SHAREPOINT_FILE', 'Manufacturing Plan New.xlsx')
-
-    # Validate required environment variables
-    required_vars = ['SAP_PASSWORD', 'GRAPH_CLIENT_ID', 'GRAPH_CLIENT_SECRET', 'SHAREPOINT_SITE_ID']
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-        logger.error("Please ensure all secrets are configured in GitHub repository settings.")
-        sys.exit(1)
+    # SharePoint configuration
+    SITE_ID = "201c767f-23cc-4eff-b76c-47a275706531,094b21f9-6ed4-47c3-a751-3b217a18b98e"
+    SHAREPOINT_FILE = "Manufacturing Plan New.xlsx"
     
     try:
         # === PHASE 1: DATA COLLECTION ===
@@ -1366,8 +1356,7 @@ def main():
         logger.error(f"Critical error in main process: {e}")
         import traceback
         logger.error(f"Full traceback: {traceback.format_exc()}")
-        sys.exit(1)
+        raise
 
 if __name__ == "__main__":
     main()
-
