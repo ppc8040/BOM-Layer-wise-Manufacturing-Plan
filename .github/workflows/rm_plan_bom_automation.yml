@@ -1,4 +1,4 @@
-name: BOM Layer-wise Daily Automation
+name: BOM Layer-wise RM Planning SAP New Daily Automation
 
 on:
   schedule:
