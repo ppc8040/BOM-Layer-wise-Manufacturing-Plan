@@ -12,7 +12,6 @@ from openpyxl import load_workbook
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import msal
-from zoneinfo import ZoneInfo
 
 if sys.platform == "win32":
     import os
@@ -292,79 +291,98 @@ def create_sharepoint_bom_layerwise_sheet(site_id, file_server_relative_url, ses
     return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "BOM Layer-wise", filtered_df_out, access_token, session_id)
 
 def create_sharepoint_fg_rm_sheet(site_id, file_server_relative_url, session_id, access_token, main_sheet_df, max_layers):
-    """Create FG-RM Required sheet directly in SharePoint"""
-    logger.info("Creating FG-RM Required sheet directly in SharePoint...")
-    
-    # Same logic as local export_fg_rm_summary
-    summary_records = []
-    
-    for main_fg in main_sheet_df["Main_FG"].unique():
-        if not isinstance(main_fg, str) or not main_fg:
-            continue
-        
-        fg_rows = main_sheet_df[main_sheet_df["Main_FG"] == main_fg]
-        rm_dict = {}
-        
-        for _, row in fg_rows.iterrows():
-            layer_1_qty_str = str(row.get("BOM_Layer_1_Quantity", "1")).strip()
-            
-            try:
-                layer_1_qtys = [float(q) if q.strip() else 1 for q in layer_1_qty_str.split(" | ")]
-                layer_1_total_qty = sum(layer_1_qtys) if layer_1_qtys else 1
-            except Exception:
-                layer_1_total_qty = 1
-            
-            for lvl in range(1, max_layers + 1):
-                mat_col = f"BOM_Layer_{lvl}"
-                desc_col = f"BOM_Layer_{lvl}_Desc"
-                qty_col = f"BOM_Layer_{lvl}_Quantity"
-                unit_col = f"BOM_Layer_{lvl}_Unit"
-                
-                mat = str(row.get(mat_col, '')).strip()
-                if mat.startswith('5'):
-                    desc = str(row.get(desc_col, '')).strip()
-                    qty_str = str(row.get(qty_col, '')).strip()
-                    unit = str(row.get(unit_col, '')).strip().upper()
-                    
-                    if 'pallet' in desc.lower() or 'box' in desc.lower() or 'label' in desc.lower() or 'paint' in desc.lower():
-                        continue
-                    
-                    try:
-                        qtys = [float(q) if q.strip() else 0 for q in qty_str.split(" | ")]
-                        component_qty = sum(qtys)
-                    except Exception:
-                        component_qty = 0
-                    
-                    if component_qty > 0:
-                        if lvl == 1:
-                            final_qty = component_qty
-                        else:
-                            final_qty = component_qty * layer_1_total_qty
-                        
-                        if mat in rm_dict:
-                            rm_dict[mat]['qty'] += final_qty
-                        else:
-                            rm_dict[mat] = {
-                                'desc': desc,
-                                'qty': final_qty,
-                                'unit': unit
-                            }
-        
-        for rm_code, details in rm_dict.items():
-            if details['qty'] > 0:
-                summary_records.append({
-                    "Main_FG": main_fg,
-                    "Raw Material": rm_code,
-                    "Raw Material Description": details['desc'],
-                    "Raw Material qty": details['qty'],
-                    "Raw Material UoM": details['unit']
-                })
-    
-    summary_df = pd.DataFrame(summary_records, columns=[
-        "Main_FG", "Raw Material", "Raw Material Description", "Raw Material qty", "Raw Material UoM"
-    ])
-    
-    return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "FG-RM Required", summary_df, access_token, session_id, chunk_size=1000)
+
+	"""Create FG-RM Required sheet directly in SharePoint with CASCADING quantity calculation"""
+
+	logger.info("Creating FG-RM Required sheet directly in SharePoint...")
+
+	summary_records = []
+
+	for main_fg in main_sheet_df["Main_FG"].unique():
+		if not isinstance(main_fg, str) or not main_fg:
+			continue
+
+		fg_rows = main_sheet_df[main_sheet_df["Main_FG"] == main_fg]
+
+		rm_dict = {}
+
+		for _, row in fg_rows.iterrows():
+			layer_1_qty_str = str(row.get("BOM_Layer_1_Quantity", "1")).strip()
+			try:
+				layer_1_qtys = [float(q) if q.strip() else 1 for q in layer_1_qty_str.split(" | ")]
+				layer_1_total_qty = sum(layer_1_qtys) if layer_1_qtys else 1
+			except Exception:
+				layer_1_total_qty = 1
+
+			for lvl in range(1, max_layers + 1):
+				mat_col = f"BOM_Layer_{lvl}"
+				desc_col = f"BOM_Layer_{lvl}_Desc"
+				qty_col = f"BOM_Layer_{lvl}_Quantity"
+				unit_col = f"BOM_Layer_{lvl}_Unit"
+
+				mat = str(row.get(mat_col, '')).strip()
+
+				if mat.startswith('5'):
+					desc = str(row.get(desc_col, '')).strip()
+					qty_str = str(row.get(qty_col, '')).strip()
+					unit = str(row.get(unit_col, '')).strip().upper()
+
+					if 'pallet' in desc.lower() or 'box' in desc.lower() or 'label' in desc.lower() or 'paint' in desc.lower():
+						continue
+
+					try:
+						qtys = [float(q) if q.strip() else 0 for q in qty_str.split(" | ")]
+						component_qty = sum(qtys)
+					except Exception:
+						component_qty = 0
+
+					if component_qty > 0:
+						# CASCADING LOGIC: Multiply by ALL superior layers
+						if lvl == 1:
+							# Layer 1 is the direct component, use Layer 1 qty
+							final_qty = component_qty * layer_1_total_qty
+						else:
+							# For Layer N (N > 1), multiply by Layer 1 qty AND all intermediate layers
+							cascading_multiplier = layer_1_total_qty
+
+							# Multiply by qty of all superior layers (Layer 2 to Layer N-1)
+							for superior_lvl in range(2, lvl):
+								superior_qty_col = f"BOM_Layer_{superior_lvl}_Quantity"
+								superior_qty_str = str(row.get(superior_qty_col, "1")).strip()
+								try:
+									superior_qtys = [float(q) if q.strip() else 1 for q in superior_qty_str.split(" | ")]
+									superior_total_qty = sum(superior_qtys) if superior_qtys else 1
+								except Exception:
+									superior_total_qty = 1
+								cascading_multiplier *= superior_total_qty
+
+							# Final quantity is component qty * cascading multiplier
+							final_qty = component_qty * cascading_multiplier
+
+						if mat in rm_dict:
+							rm_dict[mat]['qty'] += final_qty
+						else:
+							rm_dict[mat] = {
+								'desc': desc,
+								'qty': final_qty,
+								'unit': unit
+							}
+
+		for rm_code, details in rm_dict.items():
+			if details['qty'] > 0:
+				summary_records.append({
+					"Main_FG": main_fg,
+					"Raw Material": rm_code,
+					"Raw Material Description": details['desc'],
+					"Raw Material qty": details['qty'],
+					"Raw Material UoM": details['unit']
+				})
+
+	summary_df = pd.DataFrame(summary_records, columns=[
+		"Main_FG", "Raw Material", "Raw Material Description", "Raw Material qty", "Raw Material UoM"
+	])
+
+	return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "FG-RM Required", summary_df, access_token, session_id, chunk_size=1000)
 
 def create_sharepoint_mb52_sheet(site_id, file_server_relative_url, session_id, access_token, stock_df):
     """Create MB52 Raw Data sheet directly in SharePoint"""
@@ -590,7 +608,7 @@ def set_sharepoint_timestamp(site_id, file_server_relative_url, worksheet_name, 
         "workbook-session-id": session_id
     }
     
-    update_datetime = datetime.now(ZoneInfo("Asia/Dubai")).strftime('Last Updated: %d-%m-%Y %H:%M:%S')
+    update_datetime = datetime.now().strftime('Last Updated: %d-%m-%Y %H:%M:%S')
     payload = {"values": [[update_datetime]]}
     
     update_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{cell_address}')"
@@ -949,7 +967,7 @@ def set_fixed_header_timestamp(site_id, file_server_relative_url, worksheet_name
     }
 
     # 1) Write timestamp value
-    ts_text = "Last Updated: " + datetime.now(ZoneInfo("Asia/Dubai")).strftime('%d-%m-%Y %H:%M:%S')
+    ts_text = "Last Updated: " + datetime.now().strftime('%d-%m-%Y %H:%M:%S')
     put_url = (
         f"https://graph.microsoft.com/v1.0/sites/{site_id}"
         f"/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{cell_address}')"
@@ -1398,4 +1416,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
