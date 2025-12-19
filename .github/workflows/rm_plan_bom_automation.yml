@@ -1,0 +1,124 @@
+name: BOM Layer-wise Daily Automation
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # Every day at 9:00 AM Dubai Time (5:00 AM UTC)
+  workflow_dispatch:  # Allow manual triggering for testing
+
+jobs:
+  run-bom-automation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # Total timeout for all retry attempts
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Cache Python dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run BOM automation with 3 retry attempts
+      run: |
+        #!/bin/bash
+        set +e  # Don't exit on error
+        
+        MAX_ATTEMPTS=3
+        ATTEMPT=1
+        SUCCESS=false
+        TIMEOUT_MINUTES=15  # 15 minutes timeout per attempt
+        
+        echo "🚀 Starting BOM Layer-wise automation"
+        echo "⏰ Schedule: Daily at 9:00 AM Dubai Time" 
+        echo "🔄 Max attempts: $MAX_ATTEMPTS"
+        echo "⏱️  Timeout per attempt: $TIMEOUT_MINUTES minutes"
+        echo "========================================"
+        
+        while [ $ATTEMPT -le $MAX_ATTEMPTS ] && [ "$SUCCESS" = false ]; do
+          echo ""
+          echo "🔥 ATTEMPT $ATTEMPT/$MAX_ATTEMPTS"
+          echo "Started: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "----------------------------------------"
+          
+          # Run Python script with timeout
+          timeout ${TIMEOUT_MINUTES}m python BOM-Layer-wise-rm-planning.py
+          EXIT_CODE=$?
+          
+          echo "Finished: $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ SUCCESS: BOM automation completed successfully!"
+            echo "🎯 Completed on attempt: $ATTEMPT/$MAX_ATTEMPTS"
+            SUCCESS=true
+          elif [ $EXIT_CODE -eq 124 ]; then
+            echo "❌ TIMEOUT: Process exceeded $TIMEOUT_MINUTES minutes"
+            echo "⏰ Attempt $ATTEMPT failed due to timeout"
+          else
+            echo "❌ ERROR: Script failed with exit code: $EXIT_CODE"
+            echo "🔍 Attempt $ATTEMPT failed due to script error"
+          fi
+          
+          if [ "$SUCCESS" = false ] && [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+            echo "⏳ Waiting 2 minutes before retry..."
+            sleep 120  # Wait 2 minutes between attempts
+          fi
+          
+          ATTEMPT=$((ATTEMPT + 1))
+        done
+        
+        echo ""
+        echo "========================================"
+        if [ "$SUCCESS" = true ]; then
+          echo "🎉 WORKFLOW SUCCESS!"
+          echo "✅ BOM automation completed successfully"
+          exit 0
+        else
+          echo "💥 WORKFLOW FAILED!"
+          echo "❌ All $MAX_ATTEMPTS attempts failed"
+          echo "🔍 Check logs for error details"
+          exit 1
+        fi
+        
+    - name: Upload logs if available
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: bom-automation-logs-${{ github.run_number }}
+        path: |
+          *.log
+          bom_layerwise.log
+        retention-days: 7
+        if-no-files-found: ignore
+        
+    - name: Success notification
+      if: success()
+      run: |
+        echo "📊 AUTOMATION SUMMARY"
+        echo "====================="
+        echo "✅ Status: Completed successfully"
+        echo "📅 Next run: Tomorrow at 9:00 AM Dubai time"
+        echo "⏱️  Expected runtime: ~5-15 minutes"
+        
+    - name: Failure notification  
+      if: failure()
+      run: |
+        echo "🚨 AUTOMATION FAILED"
+        echo "===================="
+        echo "❌ All 3 retry attempts failed"
+        echo "🔍 Check the job logs above for error details"
+        echo "🛠️  You can manually trigger the workflow to retry"
+        echo "📅 Next scheduled run: Tomorrow at 9:00 AM Dubai time"
