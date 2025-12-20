@@ -55,7 +55,7 @@ jobs:
           echo "----------------------------------------"
           
           # Run Python script with timeout
-          timeout ${TIMEOUT_MINUTES}m python BOM-Layer-wise-live.py
+          timeout ${TIMEOUT_MINUTES}m python BOM-Layer-wise-live-v2.py
           EXIT_CODE=$?
           
           echo "Finished: $(date '+%Y-%m-%d %H:%M:%S UTC')"
