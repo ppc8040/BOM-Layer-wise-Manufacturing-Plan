@@ -500,7 +500,7 @@ def read_sharepoint_worksheet_data(site_id, file_server_relative_url, worksheet_
         return pd.DataFrame()
 
 def update_sharepoint_production_tracker_results(site_id, file_server_relative_url, session_id, access_token, results_df, full_df):
-    """Update Production Tracker columns P and Q with FIFO allocation results"""
+    """Update Production Tracker columns M and N with FIFO allocation results"""
     session = requests.Session()
     
     api_headers = {
@@ -510,10 +510,10 @@ def update_sharepoint_production_tracker_results(site_id, file_server_relative_u
     }
     
     try:
-        # Set headers for columns P and Q
+        # Set headers for columns M and N
         header_updates = [
-            {"range": "P1", "values": [["Material Available"]]},
-            {"range": "Q1", "values": [["Shortage Details"]]}
+            {"range": "M1", "values": [["Material Available"]]},
+            {"range": "N1", "values": [["Shortage Details"]]}
         ]
         
         for update in header_updates:
@@ -547,29 +547,29 @@ def update_sharepoint_production_tracker_results(site_id, file_server_relative_u
                 p_values.append("NA")
                 q_values.append("NA")
         
-        # Update entire columns P and Q at once
+        # Update entire columns M and N at once
         if total_rows > 0:
-            # Update column P
-            p_range = f"P2:P{total_rows + 1}"
+            # Update column M
+            p_range = f"M2:M{total_rows + 1}"
             p_values_formatted = [[val] for val in p_values]
             p_update_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='{p_range}')"
             p_payload = {"values": p_values_formatted}
             
             p_response = session.patch(p_update_url, headers=api_headers, json=p_payload, timeout=300)
             if p_response.status_code in [200, 201]:
-                logger.info("Column P (Material Available) updated successfully")
+                logger.info("Column M (Material Available) updated successfully")
             
-            # Update column Q
-            q_range = f"Q2:Q{total_rows + 1}"
+            # Update column N
+            q_range = f"N2:N{total_rows + 1}"
             q_values_formatted = [[val] for val in q_values]
             q_update_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='{q_range}')"
             q_payload = {"values": q_values_formatted}
             
             q_response = session.patch(q_update_url, headers=api_headers, json=q_payload, timeout=300)
             if q_response.status_code in [200, 201]:
-                logger.info("Column Q (Shortage Details) updated successfully")
+                logger.info("Column N (Shortage Details) updated successfully")
         
-        # Apply formatting to columns P and Q
+        # Apply formatting to columns M and N
         apply_production_tracker_formatting(site_id, file_server_relative_url, session_id, access_token, total_rows)
         
         updated_count = len([idx for idx in range(len(full_df)) if idx in results_mapping])
@@ -581,7 +581,7 @@ def update_sharepoint_production_tracker_results(site_id, file_server_relative_u
         return False
 
 def apply_production_tracker_formatting(site_id, file_server_relative_url, session_id, access_token, total_rows):
-    """Apply formatting to Production Tracker columns P and Q"""
+    """Apply formatting to Production Tracker columns M and N"""
     session = requests.Session()
     
     api_headers = {
@@ -591,8 +591,8 @@ def apply_production_tracker_formatting(site_id, file_server_relative_url, sessi
     }
     
     try:
-        # Format headers (P1:Q1)
-        header_range = "P1:Q1"
+        # Format headers (M1:N1)
+        header_range = "M1:N1"
         
         header_fill_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='{header_range}')/format/fill"
         header_fill_payload = {"color": "#366092"}
@@ -604,7 +604,7 @@ def apply_production_tracker_formatting(site_id, file_server_relative_url, sessi
         
         # Data range formatting
         if total_rows > 0:
-            data_range = f"P2:Q{total_rows + 1}"
+            data_range = f"M2:N{total_rows + 1}"
             
             # Apply borders
             border_ids = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight", "InsideHorizontal", "InsideVertical"]
@@ -613,11 +613,11 @@ def apply_production_tracker_formatting(site_id, file_server_relative_url, sessi
                 border_payload = {"style": "Continuous", "color": "#000000", "weight": "Thin"}
                 session.patch(border_url, headers=api_headers, json=border_payload)
             
-            # Auto-fit columns P and Q
-            autofit_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='P:Q')/format/autofitColumns"
+            # Auto-fit columns M and N
+            autofit_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='M:N')/format/autofitColumns"
             session.post(autofit_url, headers=api_headers)
         
-        logger.info("Production Tracker columns P and Q formatted successfully")
+        logger.info("Production Tracker columns M and N formatted successfully")
         
     except Exception as e:
         logger.warning(f"Error formatting Production Tracker columns: {e}")
@@ -1382,7 +1382,7 @@ def main():
             success_tracker = update_sharepoint_production_tracker_results(SITE_ID, SHAREPOINT_FILE, session_id, access_token, results_df, full_df)
             
             # After finishing Production Tracker updates
-            set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "Production Tracker", "R1", session_id, access_token)
+            set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "Production Tracker", "O1", session_id, access_token)
 
             # After finishing BOM Layer-wise updates
             set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "BOM Layer-wise", "S1", session_id, access_token)
