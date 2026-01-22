@@ -208,17 +208,17 @@ def apply_sharepoint_formatting_fixed(site_id, file_server_relative_url, workshe
 def create_sharepoint_bom_layerwise_sheet(site_id, file_server_relative_url, session_id, access_token, df_bom, all_paths, max_layers, header_mapping, header_qty_mapping):
     """Create BOM Layer-wise sheet directly in SharePoint"""
     logger.info("Creating BOM Layer-wise sheet directly in SharePoint...")
-    
+
     # Same processing logic as local export_tree_paths
     columns = ["Main_FG", "Main_FG_Description"]
     for lvl in range(1, max_layers+1):
         columns.extend([
             f"BOM_Layer_{lvl}",
-            f"BOM_Layer_{lvl}_Desc", 
+            f"BOM_Layer_{lvl}_Desc",
             f"BOM_Layer_{lvl}_Quantity",
             f"BOM_Layer_{lvl}_Unit"
         ])
-    
+
     records = []
     for path in all_paths:
         row = dict()
@@ -228,22 +228,22 @@ def create_sharepoint_bom_layerwise_sheet(site_id, file_server_relative_url, ses
             row["Main_FG_Description"] = header_mapping.get(first[0], "")
         else:
             row["Main_FG"], row["Main_FG_Description"] = "", ""
-        
+
         for i, comp in enumerate(path):
             if i < max_layers:
                 row[f"BOM_Layer_{i+1}"] = comp[4]
                 row[f"BOM_Layer_{i+1}_Desc"] = comp[1]
                 row[f"BOM_Layer_{i+1}_Quantity"] = comp[2]
                 row[f"BOM_Layer_{i+1}_Unit"] = comp[3]
-        
+
         records.append(row)
-    
+
     df_out = pd.DataFrame(records, columns=columns)
-    
+
     # Apply same filtering as local
     filtered_df_out = df_out[df_out["Main_FG"].str.startswith(("A", "C", "I"))].copy()
     logger.info(f"Filtered rows (A/C/I only), remaining count: {len(filtered_df_out)}")
-    
+
     # Apply BOM header quantity division
     def divide_qtys_by_divisor(qty_str, divisor):
         try:
@@ -255,39 +255,44 @@ def create_sharepoint_bom_layerwise_sheet(site_id, file_server_relative_url, ses
             return result
         except Exception as e:
             return qty_str
-    
+
     for main_fg, group in filtered_df_out.groupby("Main_FG"):
         divisor = header_qty_mapping.get(main_fg, 1)
         try:
             divisor = float(divisor)
         except Exception:
             divisor = 1
-        
+
         if pd.notna(divisor) and divisor != 0:
             mask = filtered_df_out["Main_FG"] == main_fg
-            filtered_df_out.loc[mask, "BOM_Layer_1_Quantity"] = filtered_df_out.loc[mask, "BOM_Layer_1_Quantity"].apply(divide_qtys_by_divisor, divisor=divisor)
-    
+            # ensure column is object/string before assigning string results
+            filtered_df_out["BOM_Layer_1_Quantity"] = filtered_df_out["BOM_Layer_1_Quantity"].astype("object")
+            filtered_df_out.loc[mask, "BOM_Layer_1_Quantity"] = (
+                filtered_df_out.loc[mask, "BOM_Layer_1_Quantity"]
+                .apply(divide_qtys_by_divisor, divisor=divisor)
+            )
+
     # Convert G to KG for all layers
     for lvl in range(1, max_layers + 1):
         qty_col = f"BOM_Layer_{lvl}_Quantity"
         unit_col = f"BOM_Layer_{lvl}_Unit"
-        
+
         if qty_col in filtered_df_out.columns and unit_col in filtered_df_out.columns:
             mask = filtered_df_out[unit_col].astype(str).str.strip().str.upper() == 'G'
             n_g = mask.sum()
-            
+
             if n_g > 0:
                 def convert_and_scale_g_to_kg(row):
                     qty_value = row[qty_col]
                     try:
                         q = float(qty_value)
-                    except:
+                    except Exception:
                         q = 0.0
                     return q / 1000
-                
+
                 filtered_df_out.loc[mask, qty_col] = filtered_df_out.loc[mask].apply(convert_and_scale_g_to_kg, axis=1)
                 filtered_df_out.loc[mask, unit_col] = 'KG'
-    
+
     return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "BOM Layer-wise", filtered_df_out, access_token, session_id)
 
 def create_sharepoint_fg_rm_sheet(site_id, file_server_relative_url, session_id, access_token, main_sheet_df, max_layers):
@@ -1440,3 +1445,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
