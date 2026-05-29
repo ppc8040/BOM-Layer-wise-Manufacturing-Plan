@@ -1,8 +1,6 @@
 name: BOM Layer-wise RM Planning SAP New Daily Automation
 
 on:
-  schedule:
-    - cron: '0 5 * * 1-6'  # Every day at 10:00 AM Dubai Time (6:00 AM UTC)
   workflow_dispatch:  # Allow manual triggering for testing
 
 jobs:
