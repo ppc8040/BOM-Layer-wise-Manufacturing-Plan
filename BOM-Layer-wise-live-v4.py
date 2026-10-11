@@ -1603,8 +1603,10 @@ def _ps_kind(desc, mg=""):
         return "coil"
     if is_foil_component(d, mg):
         return "foil"
-    if re.match(r"^\s*(HPS\d?|HPC\d?|TPHPS|TPHPC)\b", d):
-        return "hairpin"
+    if re.match(r"^\s*(HPS\d?|TPHPS)\b", d):
+        return "hps"      # hairpin straight
+    if re.match(r"^\s*(HPC\d?|TPHPC)\b", d):
+        return "hpc"      # hairpin cross
     if re.match(r"^\s*STR\d?\b", d):
         return "straight"
     if re.search(r"U[ -]?BEND", d):
@@ -1626,11 +1628,23 @@ def _ps_round(x):
     return None if x is None else round(float(x), 4)
 
 
+def _ps_qty_text(q):
+    return str(int(q)) if float(q).is_integer() else str(round(float(q), 3))
+
+
+def _ps_size_text(w, t):
+    """'395 x 0.11' from width and thickness in mm (blank if either is missing)."""
+    if w is None or t is None:
+        return None
+    return f"{w:g} x {t:g}"
+
+
 def _ps_metrics(lines):
     """Metrics for the direct components of one node (the part itself, or one coil inside an assembly)."""
     m = {"foil_code": "", "foil_w": None, "foil_t": None, "foil_coat": "", "foil_kg": None,
          "fpi": None, "fins": None, "len": None, "surface": "", "edge": "", "check": "",
-         "hairpins": 0.0, "straight": 0.0, "ubends": 0.0,
+         "hps": 0.0, "hpc": 0.0, "hairpin_detail": "", "hps_spec": "", "hpc_spec": "",
+         "straight": 0.0, "ubends": 0.0,
          "tube_mat": "", "tube_type": "", "tube_od": None, "tube_wall": None, "tube_ctr": None, "tube_spec": "",
          "endplate": "", "inlet": "No", "outlet": "No", "box": "", "pallet": "", "notes": []}
     foils = [l for l in lines if l["kind"] == "foil"]
@@ -1641,6 +1655,7 @@ def _ps_metrics(lines):
         m["foil_kg"] = _ps_round(sum(x["qty"] for x in foils if x["code"] == f["code"]))
         mm = _FOIL_RX.search(f["desc"])
         if mm:
+            # 'AL FOIL 395 X 0.11 HYDROPHILLIC' -> roll width 395 mm, thickness 0.11 mm
             m["foil_w"], m["foil_t"] = float(mm.group(1)), float(mm.group(2))
             rest = mm.group(3).upper()
             m["foil_coat"] = ("Hydrophilic" if "HYDROPHIL" in rest else "Hydrophobic" if "HYDROPHOB" in rest
@@ -1650,16 +1665,37 @@ def _ps_metrics(lines):
         m["surface"], m["edge"], m["check"] = fin["surface"], fin["edge"], fin["check"]
         if len({x["code"] for x in foils}) > 1:
             m["notes"].append("More than one foil code: largest quantity shown")
+    detail, tin_plated = {}, False
     for l in lines:
         k = l["kind"]
-        if k == "hairpin":
-            m["hairpins"] += l["qty"]
+        if k == "hps":
+            m["hps"] += l["qty"]
+        elif k == "hpc":
+            m["hpc"] += l["qty"]
         elif k == "straight":
             m["straight"] += l["qty"]
         elif k == "ubend":
             m["ubends"] += l["qty"]
-    # tube spec from the hairpin line's item text (else the straight tube's)
-    for kind in ("hairpin", "straight"):
+        if k in ("hps", "hpc"):
+            tok = re.match(r"^\s*([A-Z0-9]+)", l["desc"].upper())
+            tok = tok.group(1) if tok else k.upper()
+            detail[tok] = detail.get(tok, 0.0) + l["qty"]
+            if tok.startswith("TP"):
+                tin_plated = True
+    # every hairpin variant on its own (HPS, HPS1, HPS2, HPC, TPHPS ...), straight family first
+    m["hairpin_detail"] = " | ".join(
+        f"{t} x{_ps_qty_text(q)}"
+        for t, q in sorted(detail.items(), key=lambda x: (0 if "HPS" in x[0] else 1, x[0])))
+    if tin_plated:
+        m["notes"].append("Includes tin-plated hairpins (TPHPS/TPHPC), counted with HPS/HPC")
+    # tube text of each hairpin type, as typed on the BOM
+    for kind, key in (("hps", "hps_spec"), ("hpc", "hpc_spec")):
+        for l in lines:
+            if l["kind"] == kind and l["itemtext"]:
+                m[key] = l["itemtext"]
+                break
+    # parsed tube size: from the straight-hairpin line, else the cross-hairpin line, else the straight tube
+    for kind in ("hps", "hpc", "straight"):
         for l in lines:
             if l["kind"] == kind and l["itemtext"]:
                 m["tube_spec"] = l["itemtext"]
@@ -1690,15 +1726,22 @@ def _ps_metrics(lines):
 
 def build_part_summary(df_layerwise):
     """From the BOM Layer-wise rows, build (Part Summary, Assembly Parts) DataFrames."""
-    part_cols = ["Part No", "Description", "Part Type", "Coils Inside", "Foil Code", "Foil Width mm",
-                 "Foil Thickness mm", "Foil Coating", "Foil kg", "FPI", "Fins per Pack", "Fin Length mm",
-                 "Fin Surface", "Fin Edge", "Fin Spec Check", "Hairpins", "Straight Tubes", "U-Bends",
+    part_cols = ["Part No", "Description", "Part Type", "Coils Inside", "Foil Code",
+                 "Foil Size mm (width x thickness)", "Foil Width mm", "Foil Thickness mm", "Foil Coating", "Foil kg",
+                 "FPI", "Fins per Pack", "Fin Length mm", "Fin Surface", "Fin Edge", "Fin Spec Check",
+                 "Hairpins HPS (Straight)", "Hairpins HPC (Cross)", "Hairpin Detail",
+                 "HPS Tube Spec (as typed)", "HPC Tube Spec (as typed)",
+                 "Straight Tubes", "U-Bends",
                  "Tube Material", "Tube Type", "Tube OD mm", "Tube Wall mm", "Tube CTR mm", "Tube Spec (as typed)",
                  "Endplate Material", "Inlet", "Outlet", "Box", "Pallet",
-                 "Total Hairpins (all coils)", "Total U-Bends (all coils)", "Total Foil kg (all coils)", "Notes"]
+                 "Total HPS (all coils)", "Total HPC (all coils)", "Total U-Bends (all coils)",
+                 "Total Foil kg (all coils)", "Notes"]
     asm_cols = ["Parent Part No", "Parent Description", "Child Part No", "Child Description", "Child Type", "Qty",
-                "Child In Part Summary", "Foil Code", "Foil kg", "FPI", "Fins per Pack", "Fin Length mm",
-                "Fin Surface", "Fin Edge", "Fin Spec Check", "Hairpins", "Straight Tubes", "U-Bends", "Tube Spec (as typed)"]
+                "Child In Part Summary", "Foil Code", "Foil Size mm (width x thickness)", "Foil Width mm",
+                "Foil Thickness mm", "Foil Coating", "Foil kg", "FPI", "Fins per Pack", "Fin Length mm",
+                "Fin Surface", "Fin Edge", "Fin Spec Check",
+                "Hairpins HPS (Straight)", "Hairpins HPC (Cross)",
+                "HPS Tube Spec (as typed)", "HPC Tube Spec (as typed)", "Straight Tubes", "U-Bends"]
     if df_layerwise is None or df_layerwise.empty or "Main_FG" not in df_layerwise.columns:
         return pd.DataFrame(columns=part_cols), pd.DataFrame(columns=asm_cols)
 
@@ -1762,12 +1805,13 @@ def build_part_summary(df_layerwise):
         if not coils and not own["foil_code"]:
             notes.append("No foil line found")
 
-        tot_h, tot_u, tot_f = own["hairpins"], own["ubends"], (own["foil_kg"] or 0.0)
+        tot_hps, tot_hpc, tot_u, tot_f = own["hps"], own["hpc"], own["ubends"], (own["foil_kg"] or 0.0)
         for c in coils:
             sub = [l for l in lines if l["layer"] == 2 and l["parent_key"] == c["key"]]
             cm = _ps_metrics(sub)
             q = c["qty"] if c["qty"] else 1.0
-            tot_h += q * cm["hairpins"]
+            tot_hps += q * cm["hps"]
+            tot_hpc += q * cm["hpc"]
             tot_u += q * cm["ubends"]
             tot_f += q * (cm["foil_kg"] or 0.0)
             ctype = (_COIL_KIND_RX.match(c["desc"]).group(1).capitalize()
@@ -1776,23 +1820,32 @@ def build_part_summary(df_layerwise):
                 notes.append(f"Coil {c['code']} has no row of its own")
             asm_rows.append([fg, desc, c["code"], c["desc"], ctype, _ps_round(c["qty"]),
                              "Yes" if c["code"] in known else "No",
-                             cm["foil_code"], cm["foil_kg"], cm["fpi"], cm["fins"], cm["len"],
-                             cm["surface"], cm["edge"], cm["check"],
-                             _ps_round(cm["hairpins"]), _ps_round(cm["straight"]), _ps_round(cm["ubends"]),
-                             cm["tube_spec"]])
+                             cm["foil_code"] or None, _ps_size_text(cm["foil_w"], cm["foil_t"]),
+                             cm["foil_w"], cm["foil_t"], cm["foil_coat"] or None, cm["foil_kg"],
+                             cm["fpi"], cm["fins"], cm["len"], cm["surface"] or None, cm["edge"] or None,
+                             cm["check"] or None,
+                             _ps_round(cm["hps"]), _ps_round(cm["hpc"]),
+                             cm["hps_spec"] or None, cm["hpc_spec"] or None,
+                             _ps_round(cm["straight"]), _ps_round(cm["ubends"])])
 
         is_asm = ptype == "Assembly of coils"
         blank = (lambda v: None if is_asm else v)
         part_rows.append([
             fg, desc, ptype, len(coils) if is_asm else None,
-            blank(own["foil_code"] or None), blank(own["foil_w"]), blank(own["foil_t"]), blank(own["foil_coat"] or None),
-            blank(own["foil_kg"]), blank(own["fpi"]), blank(own["fins"]), blank(own["len"]),
+            blank(own["foil_code"] or None),
+            blank(_ps_size_text(own["foil_w"], own["foil_t"])), blank(own["foil_w"]), blank(own["foil_t"]),
+            blank(own["foil_coat"] or None), blank(own["foil_kg"]),
+            blank(own["fpi"]), blank(own["fins"]), blank(own["len"]),
             blank(own["surface"] or None), blank(own["edge"] or None), blank(own["check"] or None),
-            blank(_ps_round(own["hairpins"])), blank(_ps_round(own["straight"])), blank(_ps_round(own["ubends"])),
+            blank(_ps_round(own["hps"])), blank(_ps_round(own["hpc"])), blank(own["hairpin_detail"] or None),
+            blank(own["hps_spec"] or None), blank(own["hpc_spec"] or None),
+            blank(_ps_round(own["straight"])), blank(_ps_round(own["ubends"])),
             blank(own["tube_mat"] or None), blank(own["tube_type"] or None), blank(own["tube_od"]),
             blank(own["tube_wall"]), blank(own["tube_ctr"]), blank(own["tube_spec"] or None),
-            own["endplate"] or None, blank(own["inlet"]), blank(own["outlet"]), own["box"] or None, own["pallet"] or None,
-            _ps_round(tot_h), _ps_round(tot_u), _ps_round(tot_f), "; ".join(dict.fromkeys(notes)) or None])
+            own["endplate"] or None, blank(own["inlet"]), blank(own["outlet"]),
+            own["box"] or None, own["pallet"] or None,
+            _ps_round(tot_hps), _ps_round(tot_hpc), _ps_round(tot_u), _ps_round(tot_f),
+            "; ".join(dict.fromkeys(notes)) or None])
 
     return (pd.DataFrame(part_rows, columns=part_cols), pd.DataFrame(asm_rows, columns=asm_cols))
 
