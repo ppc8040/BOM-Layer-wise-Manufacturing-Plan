@@ -31,6 +31,11 @@ jobs:
         pip install -r requirements.txt
         
     - name: Run BOM automation with 3 retry attempts
+      env:
+        AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        SAP_USERNAME: ${{ secrets.SAP_USERNAME }}
+        SAP_PASSWORD: ${{ secrets.SAP_PASSWORD }}
       run: |
         #!/bin/bash
         set +e  # Don't exit on error
@@ -53,7 +58,7 @@ jobs:
           echo "----------------------------------------"
           
           # Run Python script with timeout
-          timeout ${TIMEOUT_MINUTES}m python BOM-Layer-wise-live-v4.py
+          timeout ${TIMEOUT_MINUTES}m python BOM-Layer-wise-live-v5.py
           EXIT_CODE=$?
           
           echo "Finished: $(date '+%Y-%m-%d %H:%M:%S UTC')"
