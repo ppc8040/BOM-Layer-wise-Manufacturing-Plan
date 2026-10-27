@@ -32,12 +32,8 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 SAP_API_URL = "https://my409486-api.s4hana.cloud.sap/sap/opu/odata/sap/API_BILL_OF_MATERIAL_SRV;v=0002"
-USERNAME = (os.environ.get("SAP_USERNAME") or "").strip()
-PASSWORD = (os.environ.get("SAP_PASSWORD") or "").strip()
-if not USERNAME or not PASSWORD:
-    raise RuntimeError(
-        "SAP_USERNAME / SAP_PASSWORD not set - add them as GitHub repository secrets"
-    )
+USERNAME = "INDUS_OPEN_ORDER"
+PASSWORD = "w6fo3zfq/bDYr}8>BU@{i3oFd[dq#Zv\\/eL&}SKF"
 VERIFY_SSL = True
 PREFERRED_FORMAT = 'json'
 BATCH_SIZE = 500
@@ -292,13 +288,9 @@ import msal
 import json
 
 class AuthConfig:
-    CLIENT_ID = (os.environ.get("AZURE_CLIENT_ID") or "").strip()
-    CLIENT_SECRET = (os.environ.get("AZURE_CLIENT_SECRET") or "").strip()
+    CLIENT_ID = 'a2239be7-12cd-442d-983f-ea7e316ef767'
+    CLIENT_SECRET = 'sho8Q~sanlYEX3SKXjYJb0NSXL.gPRpdi63-tcmp'
     AUTHORITY = 'https://login.microsoftonline.com/ed97e9bb-e119-4bd4-ab00-307d64bdf908'
-    if not CLIENT_ID or not CLIENT_SECRET:
-        raise RuntimeError(
-            "AZURE_CLIENT_ID / AZURE_CLIENT_SECRET not set - add them as GitHub repository secrets"
-        )
 
 def get_access_token():
     """Get Microsoft Graph API access token"""
@@ -316,7 +308,7 @@ def get_access_token():
     if 'access_token' in result:
         return result['access_token']
     else:
-        raise Exception(f"Failed to acquire access token: {result.get('error_description', result)}")
+        raise Exception("Failed to acquire access token.")
 
 def get_excel_column_letter(col_num):
     """Convert column number to Excel column letter (e.g., 1 -> A, 27 -> AA)"""
@@ -734,6 +726,53 @@ def create_sharepoint_mb52_sheet(site_id, file_server_relative_url, session_id, 
     
     return create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, "MB52 Raw Data", stock_df, access_token, session_id)
 
+# def read_sharepoint_production_tracker(site_id, file_server_relative_url, session_id, access_token):
+#     """Read Production Tracker data robustly from SharePoint; return empty DF gracefully on error."""
+#     session = requests.Session()
+#     api_headers = {
+#         "Authorization": f"Bearer {access_token}",
+#         "Content-Type": "application/json",
+#         "workbook-session-id": ACTIVE_SESSION["id"] or session_id
+#     }
+#     range_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/usedRange"
+#     try:
+#         range_response = session.get(range_url, headers=api_headers, timeout=120)
+#         if range_response.status_code != 200:
+#             logger.error(f"Failed to read Production Tracker. Status: {range_response.status_code}. Will initialize as empty DataFrame.")
+#             return pd.DataFrame(), pd.DataFrame()
+#         range_data = range_response.json()
+#         values = range_data.get('values', [])
+#         if not values:
+#             logger.warning("No data found in Production Tracker")
+#             return pd.DataFrame(), pd.DataFrame()
+#         headers = values[0]
+#         data_rows = values[1:]
+#         df = pd.DataFrame(data_rows, columns=headers)
+#         df['Indus Part #'] = df['Indus Part #'].astype(str).str.strip().str.upper()
+#         if not pd.api.types.is_datetime64_any_dtype(df['DI']):
+#             df['DI'] = pd.to_datetime(df['DI'], errors='coerce')
+#         df['Status'] = df['Status'].astype(object)
+#         def is_blank(val):
+#             if pd.isna(val): return True
+#             if isinstance(val, str) and val.strip() == "": return True
+#             if isinstance(val, str) and val.strip().lower() in ("done", "cancelled"):
+#                 return False
+#             return False
+#         mask_blank = df['Status'].apply(is_blank)
+#         mask_valid = (
+#             df['Indus Part #'].notna() &
+#             (df['Indus Part #'] != '') &
+#             (pd.to_numeric(df['Qty'], errors='coerce') > 0) &
+#             df['DI'].notna()
+#         )
+#         df_filtered = df[mask_blank & mask_valid].sort_values(by=['DI'], ascending=[True])
+#         logger.info(f"Read {len(df_filtered)} valid FIFO rows from SharePoint Production Tracker")
+#         return df_filtered, df
+#     except Exception as e:
+#         logger.error(f"Exception fetching Production Tracker: {e}")
+#         return pd.DataFrame(), pd.DataFrame()
+
+
 def read_sharepoint_worksheet_data(site_id, file_server_relative_url, worksheet_name, session_id, access_token):
     """Generic function to read data from any SharePoint worksheet"""
     session = requests.Session()
@@ -771,6 +810,129 @@ def read_sharepoint_worksheet_data(site_id, file_server_relative_url, worksheet_
     except Exception as e:
         logger.error(f"Error reading SharePoint {worksheet_name}: {e}")
         return pd.DataFrame()
+
+# def update_sharepoint_production_tracker_results(site_id, file_server_relative_url, session_id, access_token, results_df, full_df):
+#     """Update Production Tracker columns P and Q with FIFO allocation results"""
+#     session = requests.Session()
+    
+#     api_headers = {
+#         "Authorization": f"Bearer {access_token}",
+#         "Content-Type": "application/json",
+#         "workbook-session-id": ACTIVE_SESSION["id"] or session_id
+#     }
+    
+#     try:
+#         # Set headers for columns P and Q
+#         header_updates = [
+#             {"range": "P1", "values": [["Material Available"]]},
+#             {"range": "Q1", "values": [["Shortage Details"]]}
+#         ]
+        
+#         for update in header_updates:
+#             update_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='{update['range']}')"
+#             session.patch(update_url, headers=api_headers, json=update, timeout=60)
+        
+#         # Create results mapping
+#         results_mapping = {
+#             int(result['index']): {
+#                 'status': result['Status'],
+#                 'shortage': result['Shortage_Details']
+#             } for _, result in results_df.iterrows()
+#         }
+        
+#         # Prepare data for ALL rows
+#         total_rows = len(full_df)
+#         p_values = []
+#         q_values = []
+        
+#         for idx, row in full_df.iterrows():
+#             status_raw = row['Status']
+#             status_clean = str(status_raw).strip().lower() if isinstance(status_raw, str) else ""
+            
+#             if status_clean in ("done", "cancelled"):
+#                 p_values.append("NA")
+#                 q_values.append("NA")
+#             elif idx in results_mapping:
+#                 p_values.append(results_mapping[idx]['status'])
+#                 q_values.append(results_mapping[idx]['shortage'])
+#             else:
+#                 p_values.append("NA")
+#                 q_values.append("NA")
+        
+#         # Update entire columns P and Q at once
+#         if total_rows > 0:
+#             # Update column P
+#             p_range = f"P2:P{total_rows + 1}"
+#             p_values_formatted = [[val] for val in p_values]
+#             p_update_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='{p_range}')"
+#             p_payload = {"values": p_values_formatted}
+            
+#             p_response = session.patch(p_update_url, headers=api_headers, json=p_payload, timeout=300)
+#             if p_response.status_code in [200, 201]:
+#                 logger.info("Column P (Material Available) updated successfully")
+            
+#             # Update column Q
+#             q_range = f"Q2:Q{total_rows + 1}"
+#             q_values_formatted = [[val] for val in q_values]
+#             q_update_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='{q_range}')"
+#             q_payload = {"values": q_values_formatted}
+            
+#             q_response = session.patch(q_update_url, headers=api_headers, json=q_payload, timeout=300)
+#             if q_response.status_code in [200, 201]:
+#                 logger.info("Column Q (Shortage Details) updated successfully")
+        
+#         # Apply formatting to columns P and Q
+#         apply_production_tracker_formatting(site_id, file_server_relative_url, session_id, access_token, total_rows)
+        
+#         updated_count = len([idx for idx in range(len(full_df)) if idx in results_mapping])
+#         logger.info(f"Production Tracker updated with {updated_count} allocation results out of {total_rows} total rows")
+#         return True
+        
+#     except Exception as e:
+#         logger.error(f"Error updating SharePoint Production Tracker: {e}")
+#         return False
+
+# def apply_production_tracker_formatting(site_id, file_server_relative_url, session_id, access_token, total_rows):
+#     """Apply formatting to Production Tracker columns P and Q"""
+#     session = requests.Session()
+    
+#     api_headers = {
+#         "Authorization": f"Bearer {access_token}",
+#         "Content-Type": "application/json",
+#         "workbook-session-id": ACTIVE_SESSION["id"] or session_id
+#     }
+    
+#     try:
+#         # Format headers (P1:Q1)
+#         header_range = "P1:Q1"
+        
+#         header_fill_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='{header_range}')/format/fill"
+#         header_fill_payload = {"color": "#366092"}
+#         session.patch(header_fill_url, headers=api_headers, json=header_fill_payload)
+        
+#         header_font_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='{header_range}')/format/font"
+#         header_font_payload = {"bold": True, "color": "#FFFFFF"}
+#         session.patch(header_font_url, headers=api_headers, json=header_font_payload)
+        
+#         # Data range formatting
+#         if total_rows > 0:
+#             data_range = f"P2:Q{total_rows + 1}"
+            
+#             # Apply borders
+#             border_ids = ["EdgeTop", "EdgeBottom", "EdgeLeft", "EdgeRight", "InsideHorizontal", "InsideVertical"]
+#             for border_id in border_ids:
+#                 border_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='{data_range}')/format/borders('{border_id}')"
+#                 border_payload = {"style": "Continuous", "color": "#000000", "weight": "Thin"}
+#                 session.patch(border_url, headers=api_headers, json=border_payload)
+            
+#             # Auto-fit columns P and Q
+#             autofit_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('Production Tracker')/range(address='P:Q')/format/autofitColumns"
+#             session.post(autofit_url, headers=api_headers)
+        
+#         logger.info("Production Tracker columns P and Q formatted successfully")
+        
+#     except Exception as e:
+#         logger.warning(f"Error formatting Production Tracker columns: {e}")
 
 def set_sharepoint_timestamp(site_id, file_server_relative_url, worksheet_name, session_id, access_token, cell_address="R1"):
     """Set timestamp in specified cell"""
@@ -1180,6 +1342,200 @@ def set_fixed_header_timestamp(site_id, file_server_relative_url, worksheet_name
     logger.info(f"Timestamp written and formatted at {worksheet_name} {cell_address}")
     return True
 
+
+# def process_fifo_allocation(df_orders, fg_rm_df, mb52_df):
+#     """FIFO ALLOCATION: Date-based FIFO across ALL orders"""
+#     logger.info("=== STARTING SHAREPOINT-BASED FIFO ALLOCATION PROCESSING ===")
+    
+#     # Create initial MB52 stock dictionary for Plant 1000
+#     mb52_stock_dict = create_mb52_stock_dict(mb52_df)
+#     initial_stock_total = sum(mb52_stock_dict.values())
+    
+#     # Initialize tracking variables
+#     results = []
+#     allocation_summary = {
+#         'total_orders': len(df_orders),
+#         'successful_orders': 0,
+#         'failed_orders': 0,
+#         'by_material': {},
+#         'stock_consumed': 0
+#     }
+    
+#     logger.info(f"Processing {len(df_orders)} orders in strict DI date order (FIFO)")
+#     logger.info(f"Initial total stock available: {initial_stock_total:.3f} units across all materials")
+    
+#     # Track statistics by material
+#     material_stats = {}
+    
+#     # Process each order in DI date sequence
+#     for order_sequence, (original_idx, order) in enumerate(df_orders.iterrows(), 1):
+#         indus_part = str(order['Indus Part #']).strip().upper()
+#         order_qty = float(order['Qty'])
+#         order_di = order['DI']
+        
+#         logger.info(f"\n--- Processing Order {order_sequence}/{len(df_orders)}: {indus_part} ---")
+#         logger.info(f"Order Details: Qty={order_qty}, DI={order_di}, Original Index={original_idx}")
+        
+#         if indus_part not in material_stats:
+#             material_stats[indus_part] = {'successful': 0, 'total': 0}
+#         material_stats[indus_part]['total'] += 1
+        
+#         # Get RM requirements for this FG
+#         rm_requirements = get_rm_requirements_for_fg(indus_part, fg_rm_df)
+        
+#         if not rm_requirements:
+#             logger.warning(f"No RM requirements found for {indus_part} - marking as Error")
+#             results.append({
+#                 'index': original_idx,
+#                 'Indus Part #': indus_part,
+#                 'Qty': order_qty,
+#                 'DI': order_di,
+#                 'Status': 'Error',
+#                 'Shortage_Details': f'No RM requirements found in FG-RM Required sheet for {indus_part}'
+#             })
+#             continue
+        
+#         logger.info(f"Found {len(rm_requirements)} RM components for {indus_part}")
+        
+#         # Apply UOM filtering
+#         rm_requirements_filtered = {}
+#         excluded_count = 0
+        
+#         for rm_code, (rm_desc, qty_per_fg, rm_uom) in rm_requirements.items():
+#             unit = str(rm_uom).strip().upper()
+#             if unit in ("L", "LT", "LITRE", "ROL", "ROLL"):
+#                 excluded_count += 1
+#                 logger.debug(f"Excluding {rm_code} due to UoM: {unit}")
+#                 continue
+#             rm_requirements_filtered[rm_code] = (rm_desc, qty_per_fg, rm_uom)
+        
+#         if excluded_count > 0:
+#             logger.info(f"Excluded {excluded_count} components due to UoM filtering")
+        
+#         if not rm_requirements_filtered:
+#             logger.warning(f"No eligible RM components for {indus_part} after UoM filtering - marking as Error")
+#             results.append({
+#                 'index': original_idx,
+#                 'Indus Part #': indus_part,
+#                 'Qty': order_qty,
+#                 'DI': order_di,
+#                 'Status': 'Error',
+#                 'Shortage_Details': f'No eligible RM components (excluded UoMs: L/ROL) for {indus_part}'
+#             })
+#             continue
+        
+#         logger.info(f"Processing {len(rm_requirements_filtered)} eligible RM components")
+        
+#         # Calculate total RM requirements for this order
+#         can_fulfill_completely = True
+#         shortage_components = []
+#         required_materials = {}
+#         total_stock_needed = 0
+        
+#         for rm_code, (rm_desc, qty_per_fg, rm_uom) in rm_requirements_filtered.items():
+#             total_required = qty_per_fg * order_qty
+#             available_stock = mb52_stock_dict.get(rm_code, 0)
+#             total_stock_needed += total_required
+            
+#             required_materials[rm_code] = {
+#                 'required': total_required,
+#                 'available': available_stock,
+#                 'desc': rm_desc,
+#                 'uom': rm_uom
+#             }
+            
+#             logger.debug(f" {rm_code}: Required={total_required:.3f} {rm_uom}, Available={available_stock:.3f}")
+            
+#             if available_stock < total_required:
+#                 can_fulfill_completely = False
+#                 shortage_qty = total_required - available_stock
+#                 shortage_components.append(f"{rm_desc} ({rm_code}): {format_shortage_quantity(shortage_qty, rm_uom)} {rm_uom}")
+#                 logger.info(f" SHORTAGE: {rm_code} needs {total_required:.3f}, only {available_stock:.3f} available")
+        
+#         logger.info(f"Total stock needed for order: {total_stock_needed:.3f} units")
+        
+#         # CRITICAL FIFO LOGIC: Reserve stock regardless of shortage status
+#         stock_consumed_this_order = 0
+#         for rm_code, details in required_materials.items():
+#             stock_to_consume = min(details['required'], details['available'])
+#             if stock_to_consume > 0:
+#                 mb52_stock_dict[rm_code] -= stock_to_consume
+#                 stock_consumed_this_order += stock_to_consume
+#                 logger.debug(f" Reserved {stock_to_consume:.3f} of {rm_code}, remaining: {mb52_stock_dict[rm_code]:.3f}")
+        
+#         allocation_summary['stock_consumed'] += stock_consumed_this_order
+        
+#         # Determine order status and record results
+#         if can_fulfill_completely:
+#             logger.info(f"Order FULFILLED: All RM components available, consumed {stock_consumed_this_order:.3f} units")
+#             results.append({
+#                 'index': original_idx,
+#                 'Indus Part #': indus_part,
+#                 'Qty': order_qty,
+#                 'DI': order_di,
+#                 'Status': 'YES',
+#                 'Shortage_Details': ''
+#             })
+#             allocation_summary['successful_orders'] += 1
+#             material_stats[indus_part]['successful'] += 1
+#         else:
+#             shortage_text = ", ".join(shortage_components)
+#             logger.info(f"Order FAILED: Component shortages detected, consumed {stock_consumed_this_order:.3f} units")
+#             logger.info(f"Shortage details: {shortage_text}")
+#             results.append({
+#                 'index': original_idx,
+#                 'Indus Part #': indus_part,
+#                 'Qty': order_qty,
+#                 'DI': order_di,
+#                 'Status': 'NO',
+#                 'Shortage_Details': shortage_text
+#             })
+#             allocation_summary['failed_orders'] += 1
+        
+#         # Progress logging
+#         if order_sequence % 10 == 0 or order_sequence == len(df_orders):
+#             remaining_stock_total = sum(mb52_stock_dict.values())
+#             stock_utilization = ((initial_stock_total - remaining_stock_total) / initial_stock_total * 100) if initial_stock_total > 0 else 0
+#             logger.info(f"Progress: {order_sequence}/{len(df_orders)} orders processed, {stock_utilization:.1f}% stock utilized")
+    
+#     # Compile final results
+#     allocation_summary['by_material'] = material_stats
+    
+#     # Convert results to DataFrame and sort by original index
+#     results_df = pd.DataFrame(results)
+#     if not results_df.empty:
+#         results_df = results_df.sort_values('index').reset_index(drop=True)
+    
+#     # Final summary logging
+#     final_stock_total = sum(mb52_stock_dict.values())
+#     total_consumed = initial_stock_total - final_stock_total
+#     stock_efficiency = (total_consumed / initial_stock_total * 100) if initial_stock_total > 0 else 0
+    
+#     logger.info("\n=== SHAREPOINT-BASED FIFO ALLOCATION COMPLETED ===")
+#     logger.info(f"Stock Utilization Summary:")
+#     logger.info(f" Initial Stock: {initial_stock_total:.3f} units")
+#     logger.info(f" Consumed Stock: {total_consumed:.3f} units ({stock_efficiency:.1f}%)")
+#     logger.info(f" Remaining Stock: {final_stock_total:.3f} units")
+#     logger.info(f"Order Fulfillment Summary:")
+#     logger.info(f" Total Orders: {allocation_summary['total_orders']}")
+#     logger.info(f" Successful: {allocation_summary['successful_orders']} ({allocation_summary['successful_orders']/allocation_summary['total_orders']*100:.1f}%)")
+#     logger.info(f" Failed: {allocation_summary['failed_orders']} ({allocation_summary['failed_orders']/allocation_summary['total_orders']*100:.1f}%)")
+    
+#     return results_df, allocation_summary
+
+# def format_shortage_quantity(qty, uom):
+#     """Return shortage quantity rounded per UOM: PC=1, KG=2, else=2"""
+#     try:
+#         qty = float(qty)
+#         if str(uom).strip().upper() == 'PC':
+#             return f"{qty:.1f}"
+#         elif str(uom).strip().upper() == 'KG':
+#             return f"{qty:.2f}"
+#         else:
+#             return f"{qty:.2f}"
+#     except Exception:
+#         return str(qty)
+
 def validate_data_linkage(df_tracker, fg_rm_df):
     """Enhanced data validation with detailed logging"""
     logger.info("=== VALIDATING DATA LINKAGE ===")
@@ -1325,15 +1681,38 @@ def main():
             # === PHASE 5: SHAREPOINT DATA VALIDATION ===
             logger.info("=== SHAREPOINT DATA VALIDATION ===")
             
+            # Read Production Tracker data from SharePoint
+            # df_orders, full_df = read_sharepoint_production_tracker(SITE_ID, SHAREPOINT_FILE, session_id, access_token)
+            
+            # if df_orders.empty:
+            #     logger.error("No SharePoint Production Tracker data available for processing")
+            #     return
+            
+            # logger.info(f"Ready to process {len(df_orders)} orders from SharePoint Production Tracker")
+            
             # Read FG-RM Required and MB52 data from SharePoint
             fg_rm_df = read_sharepoint_worksheet_data(SITE_ID, SHAREPOINT_FILE, "FG-RM Required", session_id, access_token)
             mb52_df = read_sharepoint_worksheet_data(SITE_ID, SHAREPOINT_FILE, "MB52 Raw Data", session_id, access_token)
             
+            # Validate data linkage
+            # is_valid, matches = validate_data_linkage(df_orders, fg_rm_df)
+            # if not is_valid:
+            #     logger.error("CRITICAL: No data linkage between Production Tracker and FG-RM Required!")
+            #     return
+            
+            # logger.info(f"Data validation passed: {len(matches)} matching materials")
+            
             # === PHASE 6: SHAREPOINT FIFO ALLOCATION EXECUTION ===
             logger.info("=== SHAREPOINT FIFO ALLOCATION EXECUTION ===")
             
+            # Execute the core FIFO allocation logic using SharePoint data
+            # results_df, allocation_summary = process_fifo_allocation(df_orders, fg_rm_df, mb52_df)
+            
             # === PHASE 7: SHAREPOINT RESULTS UPDATE ===
             logger.info("=== SHAREPOINT RESULTS UPDATE ===")
+            
+            # Update SharePoint Production Tracker with results
+            # success_tracker = update_sharepoint_production_tracker_results(SITE_ID, SHAREPOINT_FILE, session_id, access_token, results_df, full_df)
             
             # After finishing Production Tracker updates
             set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "Production Tracker", "R1", session_id, access_token)
@@ -1347,6 +1726,14 @@ def main():
             # After finishing MB52 Raw Data updates
             set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "MB52 Raw Data", "I1", session_id, access_token)
 
+
+            
+            # Log SharePoint operations results
+            # if success_main and success_fg_rm and success_stock and success_tracker:
+            #     logger.info("All SharePoint Excel operations completed successfully")
+            # else:
+            #     logger.warning("Some SharePoint Excel operations failed")
+                
         finally:
             # Always close the session
             try:
@@ -1360,6 +1747,20 @@ def main():
                     logger.info("SharePoint Excel session closed successfully")
             except Exception as close_error:
                 logger.warning(f"Error closing session: {close_error}")
+        
+        # # === PHASE 8: FINAL SUMMARY REPORT ===
+        # logger.info("=== SHAREPOINT-ONLY ALLOCATION SUMMARY REPORT ===")
+        # logger.info(f" Total Orders: {allocation_summary['total_orders']}")
+        # logger.info(f" Successful: {allocation_summary['successful_orders']} ({allocation_summary['successful_orders']/allocation_summary['total_orders']*100:.1f}%)")
+        # logger.info(f" Failed: {allocation_summary['failed_orders']} ({allocation_summary['failed_orders']/allocation_summary['total_orders']*100:.1f}%)")
+        
+        # if not results_df.empty:
+        #     total_qty_requested = results_df['Qty'].sum()
+        #     successful_qty = results_df[results_df['Status'] == 'YES']['Qty'].sum()
+        #     failed_qty = results_df[results_df['Status'] == 'NO']['Qty'].sum()
+        #     logger.info(f" Total Quantity Requested: {total_qty_requested}")
+        #     logger.info(f" Quantity Allocated: {successful_qty}")
+        #     logger.info(f" Quantity Short: {failed_qty}")
         
         elapsed_time = time.time() - start_time
         logger.info(f"SHAREPOINT-ONLY FIFO allocation system completed successfully in {elapsed_time:.2f} seconds")
