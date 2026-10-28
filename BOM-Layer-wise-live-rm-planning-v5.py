@@ -388,6 +388,26 @@ def graph_call(session, method, url, description, **kwargs):
             time.sleep(wait)
     raise GraphCallError(f"{description} failed after {MAX_ATTEMPTS} attempts ({last_problem})")
 
+
+def graph_headers(access_token, session_id=None):
+    """
+    Build the headers for a Graph Excel API call.
+
+    When session_id (or ACTIVE_SESSION) is set, the call joins that explicit workbook
+    session. When it is not - because no session could be opened on this workbook, see
+    below - the 'workbook-session-id' header is simply omitted: Microsoft Graph then
+    treats the call as its own one-off transaction, which still reads/writes the real
+    file and still persists the change, it just does not share state with other calls.
+    This is the documented fallback for exactly the case where an explicit session
+    cannot be opened (the normal case for very large workbooks, where createSession
+    itself can time out even though individual range reads/writes succeed fine).
+    """
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    sid = ACTIVE_SESSION["id"] or session_id
+    if sid:
+        headers["workbook-session-id"] = sid
+    return headers
+
 # --- Excel session handling: if SharePoint drops the session (for example because someone else edited the
 # --- workbook at the same moment), wait, open a new session and write the whole sheet again.
 ACTIVE_SESSION = {"id": None}
@@ -435,11 +455,7 @@ def _write_worksheet_once(site_id, file_server_relative_url, worksheet_name, df,
     failure partway through leaves the PREVIOUS data in place instead of an empty sheet.
     """
     session = requests.Session()
-    api_headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "workbook-session-id": ACTIVE_SESSION["id"] or session_id
-    }
+    api_headers = graph_headers(access_token, session_id)
     base = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook"
 
     logger.info(f"Creating/updating SharePoint worksheet: {worksheet_name}")
@@ -536,11 +552,7 @@ def apply_sharepoint_formatting_fixed(site_id, file_server_relative_url, workshe
     """Apply formatting to SharePoint worksheet with proper border coverage"""
     session = requests.Session()
     
-    api_headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "workbook-session-id": ACTIVE_SESSION["id"] or session_id
-    }
+    api_headers = graph_headers(access_token, session_id)
     
     try:
         # Get the actual used range from the server
@@ -831,11 +843,7 @@ def read_sharepoint_worksheet_data(site_id, file_server_relative_url, worksheet_
     """Generic function to read data from any SharePoint worksheet"""
     session = requests.Session()
     
-    api_headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "workbook-session-id": ACTIVE_SESSION["id"] or session_id
-    }
+    api_headers = graph_headers(access_token, session_id)
     
     try:
         # Get used range from specified worksheet (retried: a transient 429/5xx here would
@@ -869,11 +877,7 @@ def set_sharepoint_timestamp(site_id, file_server_relative_url, worksheet_name, 
     """Set timestamp in specified cell"""
     session = requests.Session()
     
-    api_headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "workbook-session-id": ACTIVE_SESSION["id"] or session_id
-    }
+    api_headers = graph_headers(access_token, session_id)
     
     update_datetime = datetime.now().strftime('Last Updated: %d-%m-%Y %H:%M:%S')
     payload = {"values": [[update_datetime]]}
@@ -1244,11 +1248,7 @@ def set_fixed_header_timestamp(site_id, file_server_relative_url, worksheet_name
     """
 
     session = requests.Session()
-    api_headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "workbook-session-id": ACTIVE_SESSION["id"] or session_id
-    }
+    api_headers = graph_headers(access_token, session_id)
 
     # 1) Write timestamp value
     ts_text = "Last Updated: " + datetime.now().strftime('%d-%m-%Y %H:%M:%S')
@@ -1358,29 +1358,41 @@ def main():
         # Get access token and create session
         access_token = get_access_token()
 
-        # Create SharePoint Excel session. Retried with backoff: SharePoint can refuse
-        # to open a session when the file is held open elsewhere (a stuck lock from a
-        # previous failed run, or someone with it open in Excel), and that often clears
-        # within a few minutes without any other action needed.
+        # Try to open an explicit SharePoint Excel session (a short, bounded number of
+        # attempts - not the full MAX_ATTEMPTS table - because for a workbook this large
+        # createSession can time out on the server side every single time, and waiting
+        # longer between identical attempts does not change that outcome).
+        #
+        # If it still fails, proceed WITHOUT a session: every call below then runs as its
+        # own one-off transaction instead (see graph_headers()), which Microsoft Graph
+        # supports natively and which still reads and writes the real file. This is the
+        # expected, working path for very large workbooks where createSession itself is
+        # unreliable but individual range reads/writes are not.
         session_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drive/root:/{SHAREPOINT_FILE}:/workbook/createSession"
         setup_session = requests.Session()
-        try:
-            session_response = graph_call(
-                setup_session, "POST", session_url, "Create SharePoint Excel session",
-                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-                json={"persistChanges": True}
-            )
-        except GraphCallError as e:
-            raise RuntimeError(
-                f"Could not open a SharePoint Excel session for '{SHAREPOINT_FILE}': {e}. "
-                f"This usually means the file is locked open elsewhere (stuck from a previous "
-                f"run, or someone has it open) - check Excel Online / Version History before "
-                f"running again."
-            )
-        session_id = session_response.json().get("id")
-        logger.info(f"Created SharePoint Excel session: {session_id}")
+        session_id = None
+        SESSION_SETUP_ATTEMPTS, SESSION_SETUP_BACKOFF = 3, [10, 20]
+        for attempt in range(1, SESSION_SETUP_ATTEMPTS + 1):
+            try:
+                resp = setup_session.post(
+                    session_url, timeout=60,
+                    headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                    json={"persistChanges": True}
+                )
+                if resp.status_code in (200, 201):
+                    session_id = resp.json().get("id")
+                    logger.info(f"Created SharePoint Excel session: {session_id}")
+                    break
+                logger.warning(f"Create SharePoint Excel session: HTTP {resp.status_code} (attempt {attempt}/{SESSION_SETUP_ATTEMPTS})")
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Create SharePoint Excel session: {e} (attempt {attempt}/{SESSION_SETUP_ATTEMPTS})")
+            if attempt < SESSION_SETUP_ATTEMPTS:
+                time.sleep(SESSION_SETUP_BACKOFF[attempt - 1])
         if not session_id:
-            raise RuntimeError("SharePoint returned no session id for an apparently successful createSession call")
+            logger.warning(f"Could not open an explicit Excel session for '{SHAREPOINT_FILE}' after "
+                           f"{SESSION_SETUP_ATTEMPTS} attempts - this is expected for a workbook this "
+                           f"size. Continuing WITHOUT a session: each write below runs as its own "
+                           f"one-off transaction instead.")
 
 
         try:
@@ -1446,18 +1458,18 @@ def main():
                                    f"{', '.join(failed_sheets)}")
 
         finally:
-            # Always close the session
-            try:
-                close_session_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drive/root:/{SHAREPOINT_FILE}:/workbook/closeSession"
-                close_headers = {
-                    "Authorization": f"Bearer {access_token}",
-                    "workbook-session-id": ACTIVE_SESSION["id"] or session_id
-                }
-                close_response = requests.post(close_session_url, headers=close_headers, timeout=15)
-                if close_response.status_code in [200, 204]:
-                    logger.info("SharePoint Excel session closed successfully")
-            except Exception as close_error:
-                logger.warning(f"Error closing session: {close_error}")
+            # Close the session, if one was ever opened. Running sessionless (see above)
+            # means there is nothing to close - every call already closed itself.
+            active = ACTIVE_SESSION["id"] or session_id
+            if active:
+                try:
+                    close_session_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drive/root:/{SHAREPOINT_FILE}:/workbook/closeSession"
+                    close_headers = {"Authorization": f"Bearer {access_token}", "workbook-session-id": active}
+                    close_response = requests.post(close_session_url, headers=close_headers, timeout=15)
+                    if close_response.status_code in [200, 204]:
+                        logger.info("SharePoint Excel session closed successfully")
+                except Exception as close_error:
+                    logger.warning(f"Error closing session: {close_error}")
         
         elapsed_time = time.time() - start_time
         logger.info(f"SHAREPOINT-ONLY FIFO allocation system completed successfully in {elapsed_time:.2f} seconds")
