@@ -301,22 +301,30 @@ class AuthConfig:
         )
 
 def get_access_token():
-    """Get Microsoft Graph API access token"""
+    """Get Microsoft Graph API access token (retries on transient network errors)"""
     auth_config = AuthConfig()
-    app = msal.ConfidentialClientApplication(
-        auth_config.CLIENT_ID, 
-        authority=auth_config.AUTHORITY, 
-        client_credential=auth_config.CLIENT_SECRET
-    )
-    
-    result = app.acquire_token_silent(scopes=['https://graph.microsoft.com/.default'], account=None)
-    if not result:
-        result = app.acquire_token_for_client(scopes=['https://graph.microsoft.com/.default'])
-    
-    if 'access_token' in result:
-        return result['access_token']
-    else:
-        raise Exception(f"Failed to acquire access token: {result.get('error_description', result)}")
+    last_error = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            app = msal.ConfidentialClientApplication(
+                auth_config.CLIENT_ID,
+                authority=auth_config.AUTHORITY,
+                client_credential=auth_config.CLIENT_SECRET
+            )
+            result = app.acquire_token_silent(scopes=['https://graph.microsoft.com/.default'], account=None)
+            if not result:
+                result = app.acquire_token_for_client(scopes=['https://graph.microsoft.com/.default'])
+            if 'access_token' in result:
+                return result['access_token']
+            # A bad secret / client ID will not fix itself, so fail immediately
+            raise Exception(f"Failed to acquire access token: {result.get('error_description', result)}")
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            if attempt < MAX_ATTEMPTS:
+                wait = BACKOFF_SECONDS[attempt - 1]
+                logger.warning(f"Token request network error ({e}); retrying in {wait}s (attempt {attempt}/{MAX_ATTEMPTS})")
+                time.sleep(wait)
+    raise Exception(f"Failed to acquire access token after {MAX_ATTEMPTS} attempts: {last_error}")
 
 def get_excel_column_letter(col_num):
     """Convert column number to Excel column letter (e.g., 1 -> A, 27 -> AA)"""
@@ -327,19 +335,73 @@ def get_excel_column_letter(col_num):
         col_num //= 26
     return letter
 
+# ============================================================================
+# GRAPH API RETRY SETTINGS
+# ============================================================================
+# SharePoint/Graph occasionally returns 429 (throttled) or 5xx (temporarily
+# unavailable). These clear on their own, so every critical Graph call below
+# is retried with an increasing wait before giving up.
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_ATTEMPTS = 6                        # 1 try + 5 retries
+BACKOFF_SECONDS = [10, 20, 40, 60, 90]  # waits between attempts (~3.5 min total)
+
+
+class GraphCallError(Exception):
+    """Raised when a critical Graph call still fails after all retries."""
+    pass
+
+
+def graph_call(session, method, url, description, **kwargs):
+    """
+    Make one Graph API call, retrying on 429/5xx and connection errors.
+    Returns the response on success (2xx).
+    Returns "INVALID_SESSION" if the server reports the workbook session is gone
+    (the caller already knows how to recover from that: open a new session and
+    rewrite the sheet).
+    Raises GraphCallError if it still fails after all attempts, or immediately
+    on a non-retryable error (e.g. 400 for a reason other than a dead session,
+    401, 403, 404).
+    """
+    last_problem = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        retry_after = None
+        try:
+            resp = session.request(method, url, timeout=kwargs.pop("timeout", 120), **kwargs)
+        except requests.exceptions.RequestException as e:
+            last_problem = f"connection error: {e}"
+        else:
+            if 200 <= resp.status_code < 300:
+                if attempt > 1:
+                    logger.info(f"{description} succeeded on attempt {attempt}")
+                return resp
+            if "InvalidSession" in resp.text:
+                return "INVALID_SESSION"
+            if resp.status_code not in RETRY_STATUS_CODES:
+                raise GraphCallError(f"{description} failed with {resp.status_code} (not retryable): {resp.text[:400]}")
+            last_problem = f"HTTP {resp.status_code}"
+            retry_after = resp.headers.get("Retry-After")
+        if attempt < MAX_ATTEMPTS:
+            wait = BACKOFF_SECONDS[attempt - 1]
+            if retry_after and str(retry_after).isdigit():
+                wait = max(wait, int(retry_after))
+            logger.warning(f"{description}: {last_problem}; retrying in {wait}s (attempt {attempt}/{MAX_ATTEMPTS})")
+            time.sleep(wait)
+    raise GraphCallError(f"{description} failed after {MAX_ATTEMPTS} attempts ({last_problem})")
+
 # --- Excel session handling: if SharePoint drops the session (for example because someone else edited the
 # --- workbook at the same moment), wait, open a new session and write the whole sheet again.
 ACTIVE_SESSION = {"id": None}
 
 def _create_workbook_session(site_id, file_server_relative_url, access_token):
     url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/createSession"
+    session = requests.Session()
     try:
-        r = requests.post(url, headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-                          json={"persistChanges": True}, timeout=30)
-        if r.status_code in (200, 201):
+        r = graph_call(session, "POST", url, "Create Excel session",
+                       headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                       json={"persistChanges": True})
+        if r not in (None, "INVALID_SESSION"):
             return r.json().get("id")
-        logger.error(f"Could not open a new Excel session: {r.status_code} {r.text[:200]}")
-    except Exception as e:
+    except GraphCallError as e:
         logger.error(f"Could not open a new Excel session: {e}")
     return None
 
@@ -365,78 +427,109 @@ def create_sharepoint_worksheet_optimized(site_id, file_server_relative_url, wor
     return False
 
 def _write_worksheet_once(site_id, file_server_relative_url, worksheet_name, df, access_token, session_id, chunk_size=1000, max_retries=5):
-    """Robust creation/update for large SharePoint sheets with data validation and exponential backoff"""
+    """
+    Robust creation/update for large SharePoint sheets with data validation and exponential backoff.
+
+    Order of operations: write the new data first, THEN clear whatever old rows/columns are
+    left over beyond it. A sheet is never blanked before the new data is confirmed written, so a
+    failure partway through leaves the PREVIOUS data in place instead of an empty sheet.
+    """
     session = requests.Session()
     api_headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "workbook-session-id": ACTIVE_SESSION["id"] or session_id
     }
+    base = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook"
 
     logger.info(f"Creating/updating SharePoint worksheet: {worksheet_name}")
-    # Check for worksheet existence, create if needed (as before)
-    ws_list_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets"
-    ws_list_resp = session.get(ws_list_url, headers=api_headers)
-    if ws_list_resp.status_code != 200 and "InvalidSession" in ws_list_resp.text:
-        return "INVALID_SESSION"
-    ws_names = [ws['name'] for ws in ws_list_resp.json().get('value', [])] if ws_list_resp.status_code == 200 else []
-    if worksheet_name not in ws_names:
-        create_ws_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets/add"
-        session.post(create_ws_url, headers=api_headers, json={"name": worksheet_name})
-        time.sleep(2)
-    # Clear data in full
     try:
-        clear_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/usedRange/clear"
-        session.post(clear_url, headers=api_headers, json={"applyTo": "Contents"}, timeout=60)
-        time.sleep(1)
-    except Exception as clear_error:
-        logger.warning(f"Clear operation failed: {clear_error}")
+        # Check for worksheet existence, create if needed
+        ws_list_resp = graph_call(session, "GET", f"{base}/worksheets", f"List worksheets ({worksheet_name})",
+                                  headers=api_headers)
+        if ws_list_resp == "INVALID_SESSION":
+            return "INVALID_SESSION"
+        ws_names = [ws['name'] for ws in ws_list_resp.json().get('value', [])]
+        if worksheet_name not in ws_names:
+            r = graph_call(session, "POST", f"{base}/worksheets/add", f"Create worksheet '{worksheet_name}'",
+                           headers=api_headers, json={"name": worksheet_name})
+            if r == "INVALID_SESSION":
+                return "INVALID_SESSION"
+            old_rows, old_cols = 0, 0
+        else:
+            # Remember how big the PREVIOUS data was, so we know what to clear after the new
+            # data lands (and never have to blank the sheet up front to find out).
+            old_rows, old_cols = 0, 0
+            try:
+                used = graph_call(session, "GET", f"{base}/worksheets('{worksheet_name}')/usedRange",
+                                  f"Read current size of '{worksheet_name}'", headers=api_headers)
+                if used == "INVALID_SESSION":
+                    return "INVALID_SESSION"
+                rc = used.json()
+                old_rows, old_cols = rc.get("rowCount", 0), rc.get("columnCount", 0)
+            except GraphCallError as e:
+                logger.warning(f"Could not read previous size of '{worksheet_name}' ({e}); "
+                               f"will skip clearing leftovers for this sheet")
+    except GraphCallError as e:
+        logger.error(f"Could not prepare worksheet '{worksheet_name}': {e}")
+        return False
 
     # Write headers first
     headers = df.columns.tolist()
     data_conv = df.astype(str).where(~df.isna(), "")  # Ensures all strings
     num_cols = len(headers)
     header_range = f"A1:{get_excel_column_letter(num_cols)}1"
-    header_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{header_range}')"
-    session.patch(header_url, headers=api_headers, json={"values": [headers]}, timeout=60)
+    header_url = f"{base}/worksheets('{worksheet_name}')/range(address='{header_range}')"
+    try:
+        r = graph_call(session, "PATCH", header_url, f"Write header ({worksheet_name})",
+                       headers=api_headers, json={"values": [headers]})
+        if r == "INVALID_SESSION":
+            return "INVALID_SESSION"
+    except GraphCallError as e:
+        logger.error(f"Could not write header for '{worksheet_name}': {e}")
+        return False
 
-    # Chunked rows
     total_rows = len(df)
     total_chunks = (total_rows + chunk_size - 1) // chunk_size
     for chunk_idx in range(0, total_rows, chunk_size):
         chunk_end = min(chunk_idx + chunk_size, total_rows)
         chunk_data = data_conv.iloc[chunk_idx:chunk_end].values.tolist()
         chunk_range = f"A{chunk_idx+2}:{get_excel_column_letter(num_cols)}{chunk_end+1}"
-        chunk_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{chunk_range}')"
-        # Exponential backoff
-        for attempt in range(max_retries):
-            try:
-                chunk_response = session.patch(
-                    chunk_url, headers=api_headers, json={"values": chunk_data}, timeout=120
-                )
-                if chunk_response.status_code in [200, 201]:
-                    logger.info(f"Chunk {(chunk_idx//chunk_size)+1}/{total_chunks} successful for '{worksheet_name}' (rows {chunk_idx+2}-{chunk_end+1})")
-                    break
-                elif chunk_response.status_code in {429, 503, 504}:
-                    wait = 2 ** attempt
-                    logger.warning(f"Throttling or timeout on chunk {(chunk_idx//chunk_size)+1}, wait {wait}s")
-                    time.sleep(wait)
-                elif "InvalidSession" in chunk_response.text:
-                    logger.warning(f"Excel session dropped on chunk {(chunk_idx//chunk_size)+1} of '{worksheet_name}'")
-                    return "INVALID_SESSION"
-                else:
-                    if attempt == max_retries - 1:
-                        logger.error(f"Chunk {(chunk_idx//chunk_size)+1} for '{worksheet_name}' failed after {max_retries} attempts: {chunk_response.text}")
-                    else:
-                        time.sleep(2)
-            except Exception as ex:
-                wait = 2 ** attempt
-                logger.warning(f"Exception on chunk {(chunk_idx//chunk_size)+1}, attempt {attempt+1}: {ex}, waiting {wait}s")
-                time.sleep(wait)
-        else:
-            logger.error(f"Giving up on chunk {(chunk_idx//chunk_size)+1} for '{worksheet_name}'")
+        chunk_url = f"{base}/worksheets('{worksheet_name}')/range(address='{chunk_range}')"
+        try:
+            r = graph_call(session, "PATCH", chunk_url,
+                           f"Write chunk {(chunk_idx//chunk_size)+1}/{total_chunks} ({worksheet_name})",
+                           headers=api_headers, json={"values": chunk_data})
+            if r == "INVALID_SESSION":
+                logger.warning(f"Excel session dropped on chunk {(chunk_idx//chunk_size)+1} of '{worksheet_name}'")
+                return "INVALID_SESSION"
+            logger.info(f"Chunk {(chunk_idx//chunk_size)+1}/{total_chunks} successful for '{worksheet_name}' (rows {chunk_idx+2}-{chunk_end+1})")
+        except GraphCallError as e:
+            logger.error(f"Giving up on chunk {(chunk_idx//chunk_size)+1} for '{worksheet_name}': {e}")
             return False
-    logger.info(f"'{worksheet_name}' data upload complete.")
+
+    new_rows, new_cols = total_rows + 1, num_cols  # +1 for the header row
+    logger.info(f"'{worksheet_name}' data upload complete ({new_rows} rows x {new_cols} cols).")
+
+    # Now that the new data is confirmed in, clear whatever old rows/columns are left over
+    # beyond it. A failure here is logged but does NOT fail the write - the new data already
+    # landed; worst case a stale tail of old rows/columns lingers until the next run.
+    leftovers = []
+    if old_rows > new_rows:
+        leftovers.append(f"A{new_rows + 1}:{get_excel_column_letter(max(old_cols, new_cols))}{old_rows}")
+    if old_cols > new_cols:
+        leftovers.append(f"{get_excel_column_letter(new_cols + 1)}1:{get_excel_column_letter(old_cols)}{new_rows}")
+    for address in leftovers:
+        try:
+            graph_call(session, "POST", f"{base}/worksheets('{worksheet_name}')/range(address='{address}')/clear",
+                      f"Clear leftover range {address} ({worksheet_name})",
+                      headers=api_headers, json={"applyTo": "Contents"})
+        except GraphCallError as e:
+            logger.warning(f"Could not clear leftover range {address} in '{worksheet_name}' ({e}); "
+                           f"the new data is in place, some old rows/columns beyond it may remain")
+    if leftovers:
+        logger.info(f"Cleared leftover rows/columns in '{worksheet_name}'")
+
     apply_sharepoint_formatting_fixed(site_id, file_server_relative_url, worksheet_name, session_id, access_token)
     return True
 def apply_sharepoint_formatting_fixed(site_id, file_server_relative_url, worksheet_name, session_id, access_token):
@@ -745,14 +838,14 @@ def read_sharepoint_worksheet_data(site_id, file_server_relative_url, worksheet_
     }
     
     try:
-        # Get used range from specified worksheet
+        # Get used range from specified worksheet (retried: a transient 429/5xx here would
+        # otherwise look identical to "the sheet is genuinely empty")
         range_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/usedRange"
-        
-        range_response = session.get(range_url, headers=api_headers, timeout=120)
-        if range_response.status_code != 200:
-            logger.error(f"Failed to read {worksheet_name}: {range_response.status_code}")
+        range_response = graph_call(session, "GET", range_url, f"Read {worksheet_name}", headers=api_headers)
+        if range_response == "INVALID_SESSION":
+            logger.error(f"Excel session dropped while reading {worksheet_name}")
             return pd.DataFrame()
-        
+
         range_data = range_response.json()
         values = range_data.get('values', [])
         
@@ -1163,9 +1256,14 @@ def set_fixed_header_timestamp(site_id, file_server_relative_url, worksheet_name
         f"https://graph.microsoft.com/v1.0/sites/{site_id}"
         f"/drive/root:/{file_server_relative_url}:/workbook/worksheets('{worksheet_name}')/range(address='{cell_address}')"
     )
-    put_resp = session.patch(put_url, headers=api_headers, json={"values": [[ts_text]]}, timeout=60)
-    if put_resp.status_code not in (200, 201):
-        logger.error(f"Timestamp write failed for {worksheet_name} {cell_address}: {put_resp.status_code} {put_resp.text}")
+    try:
+        r = graph_call(session, "PATCH", put_url, f"Write timestamp ({worksheet_name} {cell_address})",
+                       headers=api_headers, json={"values": [[ts_text]]})
+        if r == "INVALID_SESSION":
+            logger.error(f"Excel session dropped while writing timestamp for {worksheet_name} {cell_address}")
+            return False
+    except GraphCallError as e:
+        logger.error(f"Timestamp write failed for {worksheet_name} {cell_address}: {e}")
         return False
 
     # 2) Apply header formatting (fill + font) to that exact cell
@@ -1259,42 +1357,32 @@ def main():
         
         # Get access token and create session
         access_token = get_access_token()
-        session_id = None
-        
-        # Create SharePoint Excel session
-        for session_attempt in range(2):
-            try:
-                session_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drive/root:/{SHAREPOINT_FILE}:/workbook/createSession"
-                session_headers = {
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json"
-                }
-                session_payload = {"persistChanges": True}
-                
-                session_response = requests.post(session_url, headers=session_headers, json=session_payload, timeout=30)
-                if session_response.status_code in [200, 201]:
-                    session_id = session_response.json().get("id")
-                    logger.info(f"Created SharePoint Excel session: {session_id}")
-                    break
-                else:
-                    if session_attempt < 1:
-                        time.sleep(2)
-                        continue
-                    else:
-                        logger.error("Failed to create SharePoint session")
-                        return
-            except Exception as session_error:
-                if session_attempt < 1:
-                    time.sleep(2)
-                    continue
-                else:
-                    logger.error(f"Failed to create SharePoint session: {session_error}")
-                    return
-        
+
+        # Create SharePoint Excel session. Retried with backoff: SharePoint can refuse
+        # to open a session when the file is held open elsewhere (a stuck lock from a
+        # previous failed run, or someone with it open in Excel), and that often clears
+        # within a few minutes without any other action needed.
+        session_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drive/root:/{SHAREPOINT_FILE}:/workbook/createSession"
+        setup_session = requests.Session()
+        try:
+            session_response = graph_call(
+                setup_session, "POST", session_url, "Create SharePoint Excel session",
+                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                json={"persistChanges": True}
+            )
+        except GraphCallError as e:
+            raise RuntimeError(
+                f"Could not open a SharePoint Excel session for '{SHAREPOINT_FILE}': {e}. "
+                f"This usually means the file is locked open elsewhere (stuck from a previous "
+                f"run, or someone has it open) - check Excel Online / Version History before "
+                f"running again."
+            )
+        session_id = session_response.json().get("id")
+        logger.info(f"Created SharePoint Excel session: {session_id}")
         if not session_id:
-            logger.error("Could not create SharePoint Excel session")
-            return
-            
+            raise RuntimeError("SharePoint returned no session id for an apparently successful createSession call")
+
+
         try:
             # === PHASE 4: SHAREPOINT SHEET CREATION ===
             logger.info("=== SHAREPOINT SHEET CREATION ===")
@@ -1308,9 +1396,8 @@ def main():
             logger.info("Reading created BOM Layer-wise data...")
             df_main_sheet = read_sharepoint_worksheet_data(SITE_ID, SHAREPOINT_FILE, "BOM Layer-wise", session_id, access_token)
             if df_main_sheet.empty or "Main_FG" not in df_main_sheet.columns:
-                logger.error("BOM Layer-wise could not be read back, so the run stops here and the other sheets are left unchanged. "
-                             "Close the workbook everywhere and run again.")
-                return
+                raise RuntimeError("BOM Layer-wise could not be read back, so the run stops here and the other "
+                                  "sheets are left unchanged. Close the workbook everywhere and run again.")
             
             # Create FG-RM Required sheet
             logger.info("Creating FG-RM Required sheet in SharePoint...")
@@ -1346,6 +1433,17 @@ def main():
 
             # After finishing MB52 Raw Data updates
             set_fixed_header_timestamp(SITE_ID, SHAREPOINT_FILE, "MB52 Raw Data", "I1", session_id, access_token)
+
+            # A failed sheet write must fail the whole run - otherwise the workflow reports
+            # success even when a sheet was left with stale or missing data.
+            failed_sheets = [name for name, ok in [
+                ("BOM Layer-wise", success_main),
+                ("FG-RM Required", success_fg_rm),
+                ("MB52 Raw Data", success_stock),
+            ] if not ok]
+            if failed_sheets:
+                raise RuntimeError(f"These sheets failed to update and still hold their previous data: "
+                                   f"{', '.join(failed_sheets)}")
 
         finally:
             # Always close the session
