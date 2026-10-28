@@ -1320,6 +1320,44 @@ def main():
     SHAREPOINT_FILE = "RM Planning SAP New.xlsx"
     
     try:
+        # === PHASE 0: SHAREPOINT REACHABILITY PRE-CHECK ===
+        # Confirm the Azure credentials work and the file is reachable BEFORE spending
+        # 5-7 minutes pulling SAP data. This is a plain metadata read (not a workbook
+        # session), so it is fast and cheap, and it catches the class of error that
+        # createSession failing later cannot tell apart from "file just too big to open
+        # a session on": a bad/expired Azure secret, wrong site or file path, the file
+        # renamed or deleted, or no permission on it. A handful of quick attempts only -
+        # a slow metadata read strongly suggests the same underlying size/load issue that
+        # the session-less fallback already handles, so this check does not try to be
+        # exhaustive about transient errors; MAX_ATTEMPTS later covers the calls that
+        # actually matter.
+        logger.info("=== SHAREPOINT REACHABILITY PRE-CHECK ===")
+        precheck_token = get_access_token()
+        precheck_session = requests.Session()
+        precheck_url = f"https://graph.microsoft.com/v1.0/sites/{SITE_ID}/drive/root:/{SHAREPOINT_FILE}"
+        PRECHECK_ATTEMPTS, PRECHECK_BACKOFF = 2, [10]  # fast: ~10s worst case, not the full retry table
+        last_problem = None
+        for attempt in range(1, PRECHECK_ATTEMPTS + 1):
+            try:
+                resp = precheck_session.get(precheck_url, timeout=15,
+                                            headers={"Authorization": f"Bearer {precheck_token}"})
+                if resp.status_code == 200:
+                    logger.info(f"'{SHAREPOINT_FILE}' is reachable - proceeding to SAP data collection")
+                    break
+                last_problem = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            except requests.exceptions.RequestException as e:
+                last_problem = f"connection error: {e}"
+            if attempt < PRECHECK_ATTEMPTS:
+                logger.warning(f"Reachability check failed ({last_problem}); retrying once in {PRECHECK_BACKOFF[attempt - 1]}s")
+                time.sleep(PRECHECK_BACKOFF[attempt - 1])
+        else:
+            raise RuntimeError(
+                f"Cannot reach '{SHAREPOINT_FILE}' before even starting SAP data collection: {last_problem}. "
+                f"Check the Azure credentials, the site/file path, and that the file still exists "
+                f"at that location before running again - this is a basic connectivity problem, "
+                f"not the workbook-session timeout the rest of the script already works around."
+            )
+
         # === PHASE 1: DATA COLLECTION ===
         logger.info("=== DATA COLLECTION PHASE ===")
         
