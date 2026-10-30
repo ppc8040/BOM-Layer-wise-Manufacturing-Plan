@@ -30,7 +30,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: Run BOM automation with 3 retry attempts
+    - name: Run BOM automation with 2 attempts
       env:
         AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
         AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
@@ -40,10 +40,10 @@ jobs:
         #!/bin/bash
         set +e  # Don't exit on error
         
-        MAX_ATTEMPTS=3
+        MAX_ATTEMPTS=2  # 2 x 25 min + 2 min wait fits the 60 min job limit
         ATTEMPT=1
         SUCCESS=false
-        TIMEOUT_MINUTES=15  # 15 minutes timeout per attempt
+        TIMEOUT_MINUTES=25  # 25 minutes timeout per attempt
         
         echo "🚀 Starting BOM Layer-wise automation"
         echo "⏰ Schedule: Daily at 9:00 AM Dubai Time" 
@@ -58,7 +58,7 @@ jobs:
           echo "----------------------------------------"
           
           # Run Python script with timeout
-          timeout ${TIMEOUT_MINUTES}m python BOM-Layer-wise-live-rm-planning-v5.py
+          timeout ${TIMEOUT_MINUTES}m python BOM-Layer-wise-live-rm-planning-v6.py
           EXIT_CODE=$?
           
           echo "Finished: $(date '+%Y-%m-%d %H:%M:%S UTC')"
@@ -121,7 +121,7 @@ jobs:
       run: |
         echo "🚨 AUTOMATION FAILED"
         echo "===================="
-        echo "❌ All 3 retry attempts failed"
+        echo "❌ All 2 attempts failed"
         echo "🔍 Check the job logs above for error details"
         echo "🛠️  You can manually trigger the workflow to retry"
         echo "📅 Next scheduled run: Tomorrow at 9:00 AM Dubai time"
