@@ -18,7 +18,7 @@ Automated GitHub Actions pipeline that reads live Bill of Materials (BOM) data a
 | `BOM-Layer-wise-live-v2.py` | v2 — improved data handling and output formatting |
 | `BOM-Layer-wise-live-rm-planning.py` | v1 — adds raw material procurement planning output |
 | `BOM-Layer-wise-live-rm-planning-v2.py` | v2 — full RM planning |
-| `BOM-Layer-wise-live-rm-planning-v6.py` | v6 — current active version (run by `rm_plan_bom_automation.yml`); Plant 1000 stock summarised, no read-backs, header-only formatting, stops on the first failed sheet |
+| `BOM-Layer-wise-live-rm-planning-v6.py` | v6 — current active version (run by `rm_plan_bom_automation.yml`); Plant 1000 + 2000 stock summarised per plant (batches added together), no read-backs, header-only formatting, stops on the first failed sheet |
 
 Use `BOM-Layer-wise-live-rm-planning-v6.py` for production runs.
 

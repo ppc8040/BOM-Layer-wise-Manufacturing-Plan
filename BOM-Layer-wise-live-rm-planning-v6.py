@@ -47,10 +47,11 @@ MAX_LAYERS = 4
 # Until v5 the stock sheet held every plant / storage location / batch row (~176k rows), which
 # together with BOM Layer-wise pushed the workbook past what Excel Online can open within its
 # timeout (createSession and even single-row writes started returning 504 on 24-Oct-26).
-# Only Plant 1000 is used for RM planning, so stock is now filtered in SAP and summed per line
-# below, with Batch dropped. The column names in 'MB52 Raw Data' stay the same so the
-# 'MB52 1000 Stock' pivot and anything else reading the sheet keep working.
-STOCK_PLANT = "1000"
+# Stock is now filtered in SAP to the plants below (1000 for RM planning, 2000 so FG-RM can
+# later see it too) and summed per line, with Batch dropped. Each plant keeps its own rows.
+# The column names in 'MB52 Raw Data' stay the same so the 'MB52 1000 Stock' pivot (filtered
+# to Plant 1000) and anything else reading the sheet keep working.
+STOCK_PLANTS = ["1000", "2000"]
 STOCK_GROUP_BY = ['Material', 'Plant', 'StorageLocation', 'InventorySpecialStockType',
                   'InventoryStockType', 'MaterialBaseUnit']
 STOCK_BATCH_SIZE = 5000
@@ -1034,9 +1035,10 @@ def fetch_material_stock_data(api_url, username, password, verify_ssl=True, pref
     
     stock_api_url = "https://my409486-api.s4hana.cloud.sap/sap/opu/odata/sap/API_MATERIAL_STOCK_SRV"
     endpoint = f"{stock_api_url}/A_MatlStkInAcctMod"
-    # Only the planning plant is needed; filtering in SAP cuts the download from ~176k rows
+    # Only the plants in STOCK_PLANTS are needed; filtering in SAP skips the other plants' rows
+    plant_filter = ' or '.join(f"Plant eq '{plant}'" for plant in STOCK_PLANTS)
     params = {'$select': ','.join(select_fields), '$top': batch_size,
-              '$filter': f"Plant eq '{STOCK_PLANT}'", '$orderby': 'Material,StorageLocation,Batch'}
+              '$filter': f"({plant_filter})", '$orderby': 'Plant,Material,StorageLocation,Batch'}
 
     all_records = []
     skip = 0
@@ -1073,11 +1075,11 @@ def fetch_material_stock_data(api_url, username, password, verify_ssl=True, pref
             break
         skip += batch_size
 
-    logger.info(f"Total Material Stock records fetched for plant {STOCK_PLANT}: {len(all_records)}")
+    logger.info(f"Total Material Stock records fetched for plants {', '.join(STOCK_PLANTS)}: {len(all_records)}")
     return pd.DataFrame(all_records, columns=select_fields)
 
 def summarise_plant_stock(stock_df):
-    """Plant-1000 stock summed per material / storage location / stock type (Batch dropped).
+    """Stock for STOCK_PLANTS summed per plant / material / storage location / stock type (Batch dropped).
     Keeps the same 8 column names as before so the 'MB52 1000 Stock' pivot still finds its fields."""
     columns = ['Material', 'Plant', 'StorageLocation', 'Batch', 'InventorySpecialStockType',
                'InventoryStockType', 'MaterialBaseUnit', 'MatlWrhsStkQtyInMatlBaseUnit']
@@ -1086,14 +1088,15 @@ def summarise_plant_stock(stock_df):
     df = stock_df.copy()
     for col in STOCK_GROUP_BY:
         df[col] = df[col].fillna('').astype(str).str.strip()
-    df = df[df['Plant'] == STOCK_PLANT]
+    df = df[df['Plant'].isin(STOCK_PLANTS)]
     df['MatlWrhsStkQtyInMatlBaseUnit'] = pd.to_numeric(df['MatlWrhsStkQtyInMatlBaseUnit'], errors='coerce').fillna(0)
     summary = df.groupby(STOCK_GROUP_BY, as_index=False)['MatlWrhsStkQtyInMatlBaseUnit'].sum()
     summary['MatlWrhsStkQtyInMatlBaseUnit'] = summary['MatlWrhsStkQtyInMatlBaseUnit'].round(3)
     summary['Batch'] = ''
-    summary = summary.sort_values(['Material', 'StorageLocation']).reset_index(drop=True)
-    logger.info(f"Plant {STOCK_PLANT} stock summarised: {len(df)} SAP rows -> {len(summary)} rows "
-                f"({summary['Material'].nunique()} materials)")
+    summary = summary.sort_values(['Plant', 'Material', 'StorageLocation']).reset_index(drop=True)
+    for plant, rows in summary.groupby('Plant'):
+        logger.info(f"Plant {plant} stock summarised: {(df['Plant'] == plant).sum()} SAP rows -> {len(rows)} rows "
+                    f"({rows['Material'].nunique()} materials)")
     return summary[columns]
 
 def fetch_product_groups(username, password, verify_ssl=True, batch_size=5000):
